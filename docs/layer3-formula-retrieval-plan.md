@@ -87,7 +87,7 @@ export function extractQueryFormulas(query: string): QueryFormulas;
 
 **`extractQueryFormulas` (normative):**
 1. Pull math segments using the L1 scanner (`splitProtectedSegments`, mode `math`-aware): segments of kind `math` are formulas.
-2. Bare-TeX detection: if a non-math segment contains ≥ 2 TeX commands (`/\[a-zA-Z]+/g`), treat that whole segment as one formula.
+2. Bare-TeX detection (ratified via supervisor decision 2026-09-18, worker escalation): a non-math segment is a formula when it contains ≥ 2 TeX commands (`/\[a-zA-Z]+/g`), OR ≥ 1 TeX command directly followed by a braced argument (`/\[a-zA-Z]+\{/`). Rationale: a command WITH an argument is real math usage (`\frac{a}{b}`, `\sqrt{x}`); a bare command name in prose ("the \frac command") is a mention, stays text. Additionally, text segments are scanned for inline `$…$` spans (escaped-`\$` aware) — the L1 scanner's inline-dollar mode is file-mode-gated and queries have no file mode.
 3. `formulas` capped at 5 (first 5), each normalized; normalization rejects (`undefined`) are dropped silently.
 4. `cleanedQuery` = query with math segments removed (trimmed). If it would become empty, `cleanedQuery` = original query (the text leg must never starve).
 5. Zero formulas ⇒ `{ formulas: [], cleanedQuery: query }` — the dormant path.

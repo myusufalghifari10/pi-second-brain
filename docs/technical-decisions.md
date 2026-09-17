@@ -398,3 +398,30 @@
 - Content-hash cache 是 mandatory 而非 optional：`knowledge_update` 每輪重新抽取，沒有 cache 會在每次 update 對每個 PDF 重跑 GPU/RAM 重的 marker；cache 放在 knowledge dir 下，自動繼承 `PI_KNOWLEDGE_DIR` 覆寫。
 - no-shell spawn 從結構上消除 crafted path injection 風險；`maxBuffer`/timeout 讓失控的 sidecar 輸出或卡死的轉換變成一次可 fallback 的失敗，而不是卡住整個索引。
 - `file_type: "pdf"` + `converter` metadata + `Converter:` prefix 讓 filter 使用者與 provenance 檢查都不會被靜默換掉的抽取來源誤導。
+
+---
+
+## ADR-022: 公式檢索採用 structural-lexical 正規化索引（normalized token signature + FTS 融合，不用 AST/符號等價）
+
+**狀態**: 已決定
+
+**背景**: Layer 1 讓公式在 chunking 中存活並 canonicalize 數學 unicode，但檢索仍是「對 chunk 文字的 lexical 比對」：查詢 `$E=mc^{2}$` 與散文 token 競爭，`\dfrac`/`\frac`、`\le`/`\leq`、`{x}`/`x`、`\left(..\right)`、`\mathrm`、空白差異等外觀變體會破壞匹配。公式等價的完整解（AST/skeleton 結構比對、MathML、SymPy 式符號等價、MathIR、per-formula embeddings）每一條都代表重量級依賴、新向量空間或脆弱的 parser。
+
+**決策**:
+- 公式檢索走 structural-lexical 路線：index 時從 chunk `metadata.formulas` 抽出公式，`normalizeFormula` 正規化成 canonical token signature（去 layout 指令、拆 style wrapper、重用 L1 unicode maps、TeX alias 表、移除 braces、保留大小寫），存入專屬 `formulas` 表 + external-content `formulas_fts`（SCHEMA_VERSION 5→6，migration 為 pure SQL）。
+- 查詢端 `extractQueryFormulas` 用 L1 scanner 抽出查詢中的公式（含 bare-TeX 偵測，上限 5 個），對每個 KB 做 exact（正規化後完全相等，score 1.0）與 FTS（quoted-OR-terms，rank-normalized）雙腿檢索，per-chunk 取 max 分數。
+- 融合規則：已檢索到的 chunk 加上 `FORMULA_BOOST = 0.35 * formulaScore`；不在結果中的候選 chunk 以 `match_reason: "formula"` 注入，上限 5 筆，注入結果刻意 bypass `MIN_HYBRID_SCORE`——公式 exact/FTS 命中是公式證據，不是 lexical-prose 分數，不該被為散文查詢設計的 confidence gate 擋掉。
+- 明確不採用：AST/skeleton 結構比對、MathML、SymPy 式符號等價、per-formula embeddings/vector index（deferred）。chunk-level vector 已承載公式文字，公式專屬 embedding 是重複投資。
+- 非數學查詢完全休眠：查詢不含公式時整條融合路徑零執行，結果與 L3 之前 byte-identical。無新 env vars、無新 npm dependencies。
+- 既有 KB 用 one-time backfill 補齊：升級後第一次帶公式的查詢或第一次 add 時掃描 chunk `metadata_json`、寫入公式 rows，並以 `knowledge_bases.formula_index_built` flag 保證每 KB 只跑一次；整段永不 throw，失敗一律 fail-open（公式功能靜默休眠，其他行為不變）。
+
+**理由**:
+- ARQMath（Mansouri et al.）的教訓：symbolic n-gram / normalized-token baseline 在公式檢索上與完整 MathIR 系統競爭力相當，複雜度只有零頭；完整 SLT/SymPy parsing 脆弱且依賴重。brace-insensitive token 化（`{x}`≡`x`、`\frac{a}{b}`→`frac a b`）不需 parser 就涵蓋主要外觀變體。
+- 零新依賴：正規化是純字串運算 + 既有 L1 unicode maps；Node 生態沒有輕量的符號等價引擎，formula embeddings 則要新模型與新向量空間，違反本功能的 no-new-deps 前提。
+- deterministic：同輸入必得同 signature，FTS term 沿用 `prepareFtsTerms` 的 quoted-term 紀律，沒有模型推論就沒有 nondeterminism，測試可用 golden 值斷言。
+- 注入結果 bypass `MIN_HYBRID_SCORE` 是 ratify 過的取捨：`$E=mc^{2}$` 這類只有公式差異的查詢若被 confidence gate 擋掉會靜默失敗；注入上限 5 筆與 0.35 boost 上限防止公式腿淹沒正常檢索。
+- 大型 KB 的 backfill 成本以「每 KB 一次 + flag 持久化 + fail-open」控制在可接受範圍，符合 ADR-015 的長任務穩定性姿態。
+
+**重建索引邊界**:
+- SCHEMA_VERSION 5→6 migration 在既有 KB 開啟時自動執行，公式 rows 由 first-search/add 的 backfill 補齊，不需要使用者手動 `knowledge_update`；chunk identity 與 vectors 完全不受影響。
+- 公式正規化規則若未來改動（TeX alias 表新增條目必須配對 test vector），既有 formula rows 會與查詢端 signature 不對稱，需清除重建 `formulas` 表；這是未來變更的義務，不是本版行為。

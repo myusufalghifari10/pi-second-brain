@@ -62,6 +62,13 @@ PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx 
 - **轉換 timeout 只送 SIGTERM，沒有 SIGKILL 升級**。忽略 SIGTERM 的 sidecar process 可能殘留；無害（fail-open、tmpdir 清理不會 throw），但若回報 real-marker hang，先檢查殘留程序。
 - **`maxBuffer` 8 MB 涵蓋 stdout+stderr 合計**。在非常大的 PDF 上使用嘰嘰喳喳的 converter（例如 verbose docling）可能溢流 → `output_overflow` → 靜默退回 unpdf。這是設計行為，不是失敗。
 
+## 公式檢索（structural-lexical formula index）
+
+- **升級後第一次帶公式的查詢會觸發 one-time backfill，大型 KB 那一筆查詢會明顯變慢（一次）**。公式索引以 `knowledge_bases.formula_index_built` flag 保證每 KB 只建一次：升級後第一個含公式的查詢（或第一次 add）會同步掃過全部 chunks 的 `metadata_json`、正規化公式、寫入 `formulas` 表。幾十萬 chunks 的 KB 這一步可能花數秒以上，是預期行為不是 hang；之後的查詢走正常路徑。backfill 若被中斷不會寫入 built flag，下一次帶公式的查詢會重試。
+- **公式等價是 lexical-structural，不是 AST/符號等價**。外觀變體會匹配：`\dfrac{a}{b}` ≡ `\frac{a}{b}`、`\le` ≡ `\leq`、`{x}` ≡ `x`、`\left( x \right)` ≡ `(x)`、`α` ≡ `\alpha`、空白差異；大小寫保留（`E` ≠ `e`，數學是 case-sensitive）。但「結構不同而數學等價」的公式不會匹配：`e^{i\pi} + 1 = 0` 與重排的 `1 + e^{i\pi} = 0`、`x^2 - 1` 與 `(x-1)(x+1)`、同一積分的不同寫法——token 序列不同就不命中，也沒有 SymPy 式化簡。要找數學等價體靠 chunk-level vector 的語意腿，不要期待公式腿命中。
+- **注入的公式結果刻意 bypass `MIN_HYBRID_SCORE`（by design，不是 gate 漏洞）**。`match_reason: "formula"` 的注入 chunk（上限 5 筆）不經過 hybrid confidence gate，因為它們的證據是公式 exact/FTS 命中，不是 lexical-prose 分數；調高 `PI_KNOWLEDGE_MIN_HYBRID_SCORE` 不會擋掉注入結果，只會影響正常 bm25/vector/hybrid 結果。boost 也封頂在 `FORMULA_BOOST = 0.35`。
+- **backfill 失敗 = 公式功能靜默休眠（fail-open）**。公式 backfill 與融合路徑永不 throw：單一 chunk 的 metadata 解析錯誤只 skip 該 chunk，整體失敗只讓公式功能在本 process 內休眠，查詢與索引行為完全不變。代價是沒有明顯錯誤訊息；懷疑公式檢索沒作用時，先確認查詢真的含公式（`$...$`/`$$...$$`/`\[...\]`，或 ≥ 2 個 TeX 指令的 bare-TeX 段），再確認 KB 已遷移到 schema v6 且 chunks 帶 `metadata.formulas`。純文字查詢永遠不觸發公式路徑（byte-identical 結果）。
+
 ## Pi modelRegistry 不提供 API key
 
 `ctx.modelRegistry` 只管 chat model auth。沒有 `getApiKey(provider)`。Extension 用 `process.env.OPENAI_API_KEY`。這是 Pi 的設計，不是 bug。
