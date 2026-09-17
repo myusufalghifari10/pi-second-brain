@@ -16,7 +16,8 @@ math structure) and — for the first time — make quality **measurable**. Afte
 **Success (all binding):**
 - S1 `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}` retrieve the same chunks; `Co` ≠ `CO` (case-sensitive chemistry).
 - S2 `N·m` ≡ `N m` in FTS, symmetric index/query.
-- S3 `npm run eval` green: ≥ 45 golden queries across 6 domains; fixture mode is byte-deterministic
+- S3 `npm run eval` green: ≥ 45 golden queries across ≥ 6 domain files (7 delivered: math-notation,
+  formula, code, prose, chem, units, labels); fixture mode is byte-deterministic
   (two consecutive runs produce identical recall/report).
 - S4 Images referenced by sidecar markdown are persisted under a content-addressed store, links are
   rewritten live, and caption/OCR text is searchable.
@@ -45,7 +46,8 @@ math structure) and — for the first time — make quality **measurable**. Afte
 - RDKit / SMILES structural equivalence (needs heavy dep — permanent defer until explicit decision)
 - OCR of handwriting (tesseract = printed text only)
 - Structural table parsing; bio/med synonym layer; `Nm` single-token units (documented asymmetric)
-- Prose-level molecular formula detection (precision trap — math segments + `\ce{}` only, §3.1)
+- Prose-level molecular formula detection on the INDEX side (precision trap — math segments +
+  `\ce{}` only, §3.1); the QUERY-side anchored text-segment rule (§3.1 F2) stays IN scope
 - Doctor debt-ledger / audit reports (L5); invalidation cascades (L5)
 
 ## §2 Current-world facts (verified 2026-09-18 at `cc9c413`)
@@ -56,7 +58,7 @@ math structure) and — for the first time — make quality **measurable**. Afte
 | Formula rows written from chunk `metadata.formulas` via `formulaRowsFromMetadataJson` → `normalizeFormula` (single normalization entry point) | `src/engine.ts:916-940`, `:951`, backfill `:1057-1076` |
 | `preTokenizeForFTS` lives in chunker (applies `canonicalizeMathText` last, per L1 ADR-020) | `src/indexer/chunker.ts:424`, `math-text.ts:164` |
 | `SUBSCRIPT_FOLDS` already map `₂→sub2` etc.; `MATH_UNICODE_MAP` covers Greek/ops/arrows | `src/indexer/math-text.ts:128-143` |
-| Query-side bare-TeX rule catches `\ce{…}` (≥1 command + braced argument) — ratified L3 | `formula-normalize.ts:188-191`, spec L3 §3.1.2 |
+| Query-side bare-TeX rule catches `\ce{…}` (≥1 command + braced argument) — ratified L3 | `formula-normalize.ts` (bare-TeX detection function, L3 worker A) |
 | Sidecar markdown images ignored today (adapter reads only the largest `*.md`) | `src/indexer/pdf-sidecar.ts:369` |
 | `extractTexLabels` exists (deduped, `MAX_LABELS = 20`); chunk `metadata.labels` already threaded | `math-text.ts:555-556`, `chunker.ts` LaTeX section path |
 | `match_reason` union currently ends at `"formula"`; FORMULA_BOOST = 0.35, MIN_HYBRID_SCORE = 0.18 | `engine.ts:132`, `ranking.ts:5,9` |
@@ -69,8 +71,8 @@ math structure) and — for the first time — make quality **measurable**. Afte
 
 ### §3.1 Chemistry — `chem-normalize.ts` (NEW) + routing in `normalizeFormula`
 
-**Routing (single entry point, ratified):** inside `normalizeFormula`, after delimiter stripping:
-if the formula contains `\ce{` OR (it contains NO TeX commands AND matches the anchored
+**Routing (single entry point, ratified):** inside `normalizeFormula`, on the trimmed raw input:
+if it contains `\ce{` OR (it contains NO TeX commands AND matches the anchored
 MOLECULAR_RE, §3.1.1) → delegate to `chemNormalize()`. Both index side (via
 `formulaRowsFromMetadataJson` → `normalizeFormula`, engine.ts:916) and query side
 (`extractQueryFormulas`) therefore share one deterministic path.
@@ -83,10 +85,13 @@ charges, `·`/`*` hydrate dots, and state suffixes `(s)|(l)|(g)|(aq)` (stripped)
 preserved; no per-species splitting in v1). A molecule match REQUIRES ≥ 2 element tokens AND at
 least one uppercase letter — kills prose words ("No", "At", "In") unless anchored full-match.
 
-**§3.1.2 chemNormalize pipeline (normative, ordered):**
+**§3.1.2 chemNormalize pipeline (normative, ordered):** consumes the RAW formula string; runs
+BEFORE the generic token loop inside `normalizeFormula` (chem branch replaces the generic path
+entirely — it never sees FOLD_MAP `sub2`-style tokens).
 1. Strip `\ce{`/`}` wrapper and states `(s)|(l)|(g)|(aq)`.
-2. Unicode subscripts → ASCII digits (reuse `SUBSCRIPT_FOLDS`, then drop the `sub` marker inside
-   chem signatures only: `H sub2 S O sub4` → `H2 S O4`). Superscript charges `²⁺` → `^2+`.
+2. Unicode sub/superscript CHARACTERS → ASCII directly from the raw string (`₀-₉`→digits,
+   `²³`→`2`/`3`, `⁺`→`+`, `⁻`→`-`) via a local char map in `chem-normalize.ts` — do NOT reuse
+   `FOLD_MAP` (its `sub2` token forms belong to the FTS layer, not this one).
 3. Unify arrows → `->`; unify charges to trailing `^n+`/`^n-` form (`+2` ≡ `^2+` ≡ `2+`).
 4. Hydrate dot `·`/`*` → `.` token (distinct from arrow).
 5. Emit token list: element-count runs kept intact per species (`H2`, `S`, `O4`). **Paren groups
@@ -95,11 +100,14 @@ least one uppercase letter — kills prose words ("No", "At", "In") unless ancho
    multiplicatively. Mismatched parens tolerated (never throws; unterminated group = flatten to
    end with multiplier 1).
 6. Join with single space; **case preserved throughout** (`Co` cobalt ≠ `CO`).
-7. Undefined on: zero species, > 2000 chars (reuse `MAX_FORMULA_CHARS`).
+7. Rejects (returns `undefined`, L3 reject semantics) on: zero species, > `MAX_FORMULA_CHARS`
+   (`math-text.ts:200`).
 
 **Test vectors (minimum, F1):** `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}` ≡ `\ce{H2SO4(aq)}`;
-`\ce{SO4^2-}` ≡ `\ce{SO4^{2-}}` ≡ `SO4 2-`… exact expected signatures locked in tests;
+`\ce{SO4^2-}` ≡ `\ce{SO4^{2-}}` ≡ `SO4^{2-}`… exact expected signatures locked in tests;
 `Co` ≠ `CO`; `\ce{Ca(OH)2}` single signature; arrow forms unify; `e^{i\pi}` NOT chemistry.
+MOLECULAR_RE detail: NO internal whitespace within a single species (whitespace only around
+arrows in multi-species sequences).
 
 **Query side (F2):** `extractQueryFormulas` gains: text segments are additionally tested with
 MOLECULAR_RE full-match → treated as one chem formula (this makes the plain query `H2SO4` work;
@@ -116,11 +124,14 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
   (left-to-right, adjacent pairs). This makes `N·m` ≡ `N m` symmetric for index and query because
   `preTokenizeForFTS` is the shared stage (chunker.ts:424).
 - Unicode unit glyphs: verify `µ`, `Å`, `Ω`, `°` in `MATH_UNICODE_MAP`; missing ones are added with
-  paired test vectors (L1 map extension is the L1-sanctioned surface).
+  paired test vectors (L1 map extension is the L1-sanctioned surface). Omega has TWO codepoints —
+  Greek capital `U+03A9` and ohm sign `U+2126` — both must fold to the same token (locked test).
 - `Nm` (single alnum run) is NOT split — documented asymmetric (splitting alnum runs is forbidden,
   L1 invariant).
-- Hook = one function call inside `preTokenizeForFTS` after canonicalization
-  (`rewriteUnitTokens(tokens)`), pure and total.
+- Hook = wrapping the return value of `preTokenizeForFTS` (it returns a STRING,
+  `chunker.ts:424`): `return rewriteUnitTokens(canonicalizeMathText(...))`. `rewriteUnitTokens(s:
+  string): string` splits the tokenized output on whitespace, applies the rule, rejoins. Pure
+  and total.
 
 ### §3.3 Eval harness — `eval/` (NEW)
 
@@ -133,15 +144,25 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
     table. **Byte-determinism: two consecutive runs must produce identical reports** (S3).
   - `--kb llm-papers` (live-corpus report): read-only queries against the real KB, recall report,
     advisory only (corpus evolves).
-- `npm run eval` → `node dist/eval/run.js` (runner included in `tsconfig.build` — extend its
-  `include` with `"eval/**/*.ts"`). **package.json edit ratified for the `scripts.eval` line ONLY**
-  — dependencies and every other script untouched.
+- `npm run eval` → script line exactly `"eval": "npm run -s build && node dist/eval/run.js"`
+  (rebuild required — runner imports the built `dist/src/engine.js`; `tsconfig.build.json` extends
+  `include` with `"eval/**/*.ts"`). CLI passthrough: `npm run eval -- --kb llm-papers`.
+  **package.json edit ratified for the `scripts.eval` line ONLY** — dependencies and every other
+  script untouched.
 - Determinism requirements: fixture KB built with pinned embedding signature (assert matches
   warm-cache model), sorted iteration everywhere, no timestamps in report.
-- Golden v1 (Wave 1, ≥ 45 queries): math-notation ×10 (from L1/L3 ratified vectors incl. `mc²`
-  family), formula ×6 (L3 dogfood), code ×5, prose ×8 (from llm-papers probe queries — the 5
-  verified dogfood queries included), chem ×8, units ×5, labels ×3 (Wave-2 workers extend their own
-  domain file; the runner globs all files).
+- Golden v1 lands in two steps:
+  - Wave 1, worker B (29 queries — ONLY domains already supported by merged code):
+    `math-notation.json` ×10 (L1/L3 ratified vectors incl. `mc²` family), `formula.json` ×6 (L3
+    dogfood), `code.json` ×5, `prose.json` ×8 (from llm-papers probe queries — the 5 verified
+    dogfood queries included). chem/units/labels goldens are NOT in B's W1 scope — their modules
+    land in the same or a later wave, so those queries would be red mid-flight.
+  - `chem.json` ×8 is created by worker A in Wave 1 (same commit as the chem module; A's own gate
+    is scoped vitest — the eval run over chem.json happens at the orchestrator's between-waves
+    gate, after B's runner and A's module are both merged).
+  - Wave 2 extensions: D → `units.json` ×5, E → `labels.json` ×3, F → `prose.json` +1 image query.
+    Final total: 46 queries across 7 files (≥ 45, S3 is a final-state criterion). The runner globs
+    all files.
 
 ### §3.4 Images v1 — `pdf-sidecar.ts` extension
 
@@ -164,22 +185,27 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
 
 - `extractTexRefs(text): string[]` in `math-text.ts` (beside `extractTexLabels`, dedup, cap
   `MAX_REFS = 40`): matches `\ref{x}`, `\eqref{x}`, `\cref{x}`, `\Cref{x}`, `\autoref{x}`.
-- Chunker LaTeX path writes `metadata.refs` (alongside existing `labels`). NOTE: `metadata_json`
-  is an input to `chunkIdentityHash` (chunker.ts:557) — adding refs re-hashes every LaTeX-bearing
+- Chunker LaTeX path writes `metadata.refs` (alongside existing `labels` at `chunker.ts:855-861`,
+  extraction site `:912`). NOTE: `metadata_json` is an input to `chunkIdentityHash`
+  (`chunker.ts:444`) — adding refs re-hashes every LaTeX-bearing
   chunk → **planned re-embed on affected KBs** (same rebuild-boundary precedent as L1 ADR-020);
   documented in CHANGELOG + known-pitfalls.
 - `label-resolve.ts` (NEW, pure): `resolveLabelTarget(filePath, label, candidatePaths)` encoding
-  the scoping rule: scope-key = `sha1(relPath + "\0" + label)`; same-file match preferred; on
+  the scoping rule: scope-key = `sha256(relPath + "\0" + label)` (sha256 everywhere — repo
+  convention); same-file match preferred; on
   collision (same label defined in > 1 file) or zero matches → `unresolved` (never guessed).
-- Schema v7 (pure SQL, formulas-pattern clone): `label_edges` (`id` = sha256(kb,src_chunk,scope_key),
-  `kb_id`, `src_chunk_id`, `target_label`, `scope_key`, `resolved_chunk_id` NULLABLE,
+- Schema v7 (pure SQL, formulas-pattern clone): `label_edges` (`id` = sha256 of `kb_id`,
+  `src_chunk_id`, `scope_key` joined by `\0` — same convention as `chunkIdentityHash`,
+  local `createHash` in sqlite.ts per L3 lock; `kb_id`, `src_chunk_id`, `target_label`,
+  `scope_key`, `resolved_chunk_id` NULLABLE,
   `target_content_hash` NULLABLE, `kind` ∈ ref|label|link, `indexed_at`) + indexes
   `(kb_id, src_chunk_id)`, `(kb_id, scope_key)` + `knowledge_bases.label_graph_built INTEGER
   DEFAULT 0` (PRAGMA-guarded ALTER). Backfill `listChunksForLabelBackfill` clone +
   `ensureLabelGraphsBuilt` (flag + in-process Set + fail-open wrap — verbatim L3 pattern).
 - **Dependency leg** (engine.search, post-merge pre-threshold, beside formula fusion): when a
-  retrieved/injected chunk carries resolved outgoing edges → walk depth 1 (cap 2, candidate budget
-  10), boost already-retrieved referenced chunks by `FORMULA_BOOST`-style constant
+  retrieved/injected chunk carries resolved outgoing edges → walk depth 1 (`cap 2` = edges consumed
+  per triggering chunk; `candidate budget 10` = max injections per query), boost already-retrieved
+  referenced chunks by `FORMULA_BOOST`-style constant
   `DEPENDENCY_BOOST = 0.25` (ranking.ts), inject absent ones with base score = `DEPENDENCY_BOOST`
   (LOCKED: injected dependency chunks score exactly 0.25 before trust multiplier),
   `match_reason: "dependency"`, filters respected, bypass threshold — same ratified rationale as
@@ -192,8 +218,8 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
 
 | Wave | Worker | Owns (files) | Depends on | Git |
 |---|---|---|---|---|
-| 1 | A chem | `formula-normalize.ts`, `chem-normalize.ts` (NEW), `test/unit/chem-normalize.test.ts` (NEW) | — | none |
-| 1 | B eval | `eval/**` (NEW), `package.json` (scripts.eval line ONLY), `tsconfig.build.json` (include), `scripts/eval` helpers if any, `test/eval/*` fixtures | — | none |
+| 1 | A chem | `formula-normalize.ts`, `chem-normalize.ts` (NEW), `test/unit/chem-normalize.test.ts` (NEW), `eval/golden/chem.json` (NEW ×8) | — | none |
+| 1 | B eval | `eval/**` (NEW) EXCEPT `eval/golden/chem.json`, `package.json` (scripts.eval line ONLY), `tsconfig.build.json` (include), `test/eval/*` fixtures | — | none |
 | 1 | C label-extraction | `math-text.ts` (extractTexRefs only), `label-resolve.ts` (NEW), `chunker.ts` (metadata.refs threading), `test/unit/label-graph.test.ts` (NEW) | — | none |
 | 2 | D units | `units.ts` (NEW), `chunker.ts` (one hook line), `math-text.ts` (map additions if missing), `test/unit/units.test.ts` (NEW), `eval/golden/units.json` | W1 merged | none |
 | 2 | E label-schema+leg | `sqlite.ts` (v7), `engine.ts` (backfill + dependency leg + match_reason), `ranking.ts` (DEPENDENCY_BOOST), `test/unit/label-graph.test.ts` (extend), `eval/golden/labels.json` | W1-C | none |
@@ -201,13 +227,16 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
 | 2 | G docs | README, ADR-023/024/025, known-pitfalls, CHANGELOG (English) | spec only | none |
 | 3 | orchestrator | full gates + per-wave commits (explicit paths) | each wave | all |
 
-**Wave-1 collision check:** A (formula-normalize), B (eval/**+package.json), C (math-text+chunker+
-label-resolve) — disjoint ✓. **Wave-2:** D (chunker hook — AFTER C's chunker edits merged; 1-line),
-E (sqlite+engine+ranking), F (pdf-sidecar), G (docs) — disjoint ✓.
+**Wave-1 collision check:** A (formula-normalize + chem.json) vs B (eval/** except chem.json +
+package.json) — disjoint by the explicit exception ✓; C (math-text+chunker+label-resolve) —
+disjoint ✓. **Wave-2:** D (chunker hook — AFTER C's chunker edits merged; 1-line),
+E (sqlite+engine+ranking), F (pdf-sidecar + prose.json extension — B's file, sequential OK),
+G (docs) — disjoint ✓.
 **Gates per worker:** scoped `biome check --write <own files>` → `biome check .` → typecheck
-(retry-once rule for sibling races) → scoped vitest + `npm run eval --fixture` (B owns making this
-command exist; D/E/F extend goldens in their files and run it). Orchestrator runs FULL gates
-(check/typecheck/full vitest/eval/smoke) between waves and owns all commits.
+(retry-once rule for sibling races) → scoped vitest; worker B additionally runs
+`npm run eval -- --fixture` (it owns the runner). A's chem.json eval gate runs at the orchestrator
+between waves. Orchestrator runs FULL gates (check/typecheck/full vitest/eval/smoke) between waves
+and owns all commits.
 
 ## §5 Criteria → tests
 
@@ -217,8 +246,8 @@ command exist; D/E/F extend goldens in their files and run it). Orchestrator run
   cap/reject semantics unchanged.
 - **F3** units: `N cdot m` rewrite (≥ 6 unit-pair vectors), non-unit pairs untouched
   (`a cdot b` unchanged), `Nm` documented asymmetric (locked by test), glyph vectors (`µ`, `Å`, `Ω`).
-- **F4** harness: `npm run eval --fixture` green; two runs byte-identical; `--kb llm-papers` mode
-  runs read-only; ≥ 45 golden queries across ≥ 6 domain files.
+- **F4** harness: `npm run eval -- --fixture` green; two runs byte-identical; `--kb llm-papers`
+  mode runs read-only; ≥ 45 golden queries across ≥ 6 domain files (7 at completion).
 - **F5** images: fake-sidecar emits image → store file (sha256 name), link rewritten, caption text
   searchable via search; missing image file = dropped ref, no error.
 - **F6** OCR: probe-miss path green (no tesseract on this machine); env `off` honored; OCR text
@@ -246,7 +275,7 @@ command exist; D/E/F extend goldens in their files and run it). Orchestrator run
 ## §7 Verification protocol
 
 Per wave (orchestrator): `npm run check` → `npm run typecheck` →
-`npx vitest --run test/unit/ --testTimeout=15000` → `npm run eval --fixture` (from Wave 1-B on) →
+`npx vitest --run test/unit/ --testTimeout=15000` → `npm run eval -- --fixture` (from Wave 1 on) →
 smoke `node dist/src/engine.js` import → blast-radius `git diff --stat` review → explicit-path
 commits. `package.json`/docs never staged by workers.
 
