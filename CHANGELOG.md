@@ -1,0 +1,370 @@
+# Changelog
+
+## [Unreleased]
+
+### Added
+- Added math and science-aware chunking for Markdown and LaTeX knowledge bases. Display math (`$$`, ` ```math ` fences, `\begin{equation}`-family environments, `\[..\]`), pipe tables, and fenced code are atomic chunking units that are never split mid-structure, and oversized blocks split only at row/line boundaries.
+- Added cross-notation math matching: `preTokenizeForFTS` canonicalizes math unicode (Greek letters, operators, relations, arrows, super/subscripts) onto LaTeX command words, so `x²`, `x^2`, `α`, and `\alpha` all hit the same FTS terms, symmetrically for index and query.
+- Added Obsidian-style vault metadata for Markdown chunks: frontmatter `title`/`tags`/`aliases`, `[[wikilinks]]`, and per-chunk display-formula excerpts become chunk metadata and embedding context lines.
+- Documents whose first line is `---` are parsed as frontmatter (Obsidian/gray-matter semantics): the block is stripped from chunk content and its values become `title`/`tags`/`aliases` chunk metadata.
+- Added a dedicated `latex` file type (`.tex`, `.ltx`, `.latex`) with `\chapter`/`\section`/`\subsection`/`\subsubsection` breadcrumb chunking, `\label` metadata, LaTeX heading symbols, and `file_type: latex` filter support (`tex`/`ltx`/`latex` aliases).
+
+### Changed
+- Markdown and LaTeX chunks hash differently after this change; run `knowledge_update` once after upgrading so affected Markdown/LaTeX files re-chunk and re-embed. Other file types keep their existing chunk hashes and vectors.
+
+## [0.10.1] - 2026-09-10
+
+### Fixed
+- Repaired `knowledge_update` recovery for knowledge bases whose SQLite chunks are ahead of a short or truncated vector file; update now rebuilds or re-embeds missing vectors instead of leaving the KB in `error` (#13).
+- Aligned the published Tree-sitter runtime and grammar dependency graph so clean npm installs no longer emit peer override warnings for `tree-sitter@0.25.1` incompatibilities (#14).
+
+## [0.10.0] - 2026-08-27
+
+### Added
+- Added Bash AST indexing for `.sh` and `.bash` scripts, including both `name() {}` and `function name {}` forms with bounded fallback chunking (#12).
+- Added GNU C AST indexing for `.c` source files, covering functions, prototypes, structs, unions, enums, typedefs, reliable preprocessor symbols, and `static` metadata (#12).
+- Added C++ AST indexing for `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx` files, covering namespaces, classes, methods, constructors, destructors, enums, templates, and access visibility where the parser reports it reliably (#12).
+- Added QML AST indexing for `.qml` files, covering imports, component/object hierarchy, ids, properties, signals, handlers, bindings, and embedded JavaScript functions (#12).
+
+### Changed
+- Kept ambiguous `.h` headers classified as text by default; use typed C++ header extensions for C++ AST indexing (#12).
+- Parser errors in Bash, C, C++, and QML now intentionally fall back to existing text chunking instead of indexing partial structural claims (#12).
+
+## [0.9.0] - 2026-08-26
+
+### Added
+- Added recursive AST chunking for supported code files, including same-parent sibling packing, bounded oversized leaf fallback, and structural chunk metadata for language, symbol kind, scope, parent symbol, signature, export state, AST path, and source line range (#11).
+- Added AST-backed symbol extraction for supported code files so method symbols remain searchable independently from retrieval chunk boundaries (#11).
+- Added metadata-driven AST-aware adaptive context expansion so `adaptive` search can prefer same-file parent/sibling chunks while preserving bounded context and clean returned source.
+
+### Changed
+- Code indexing now analyzes supported source files once for both retrieval chunks and symbols, while preserving regex/text fallbacks for unsupported or unparsable content.
+- Searchable embedding/FTS text now includes richer deterministic code structure; existing KBs should be updated or rebuilt to benefit from the new metadata.
+
+
+## [0.8.1] - 2026-08-08
+
+### Fixed
+- Declared host approval tiers for public knowledge tools so read-only search no longer defaults to exec approval in OMP headless sessions (#10).
+
+## [0.8.0] - 2026-08-04
+
+### Added
+- Added Hugging Face Text Embeddings Inference reranker API format support through `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei`.
+
+
+## [0.7.0] - 2026-07-28
+
+### Added
+- Added `PI_KNOWLEDGE_RERANKER_RAW_LOGITS` for trusted single-logit local/Hugging Face cross-encoder rerankers whose sigmoid scores flatten near 1.0.
+
+### Fixed
+- Preserved the default reranker config shape when raw logits are unset.
+- Rejected multi-logit and non-finite raw reranker outputs instead of guessing a relevance score.
+
+## [0.6.0] - 2026-07-25
+
+### Added
+- Added configurable local/Hugging Face reranker selection through `PI_KNOWLEDGE_RERANKER`, including revision, dtype, and trusted mirror settings.
+- Added API reranker support for `deep` search with Cohere/Jina-compatible requests and declarative custom JSON response mapping.
+- Added embedding metadata signatures and dimensions so knowledge bases can detect incompatible vector spaces after provider, API base URL, preprocessing, or dimension changes.
+
+### Changed
+- Document embedding batches now surface OpenAI-compatible API failures instead of falling back to local embeddings during add, update, or import, preventing mixed-provider vector files.
+- `knowledge_search` skips incompatible or legacy unsigned vectors with warnings, while hybrid search can fall back to BM25-only results until `knowledge_update` rebuilds vectors.
+
+### Fixed
+- Rebuilds unchanged chunks during `knowledge_update` when embedding metadata is missing or incompatible, rather than reusing stale vectors.
+- Resets Transformers.js remote model settings before embedding loads so custom reranker mirrors do not affect the embedding pipeline.
+
+## [0.5.6] - 2026-07-23
+
+### Added
+- Added runtime search tuning profiles (`auto`, `low_token`, `precision`, `recall`, `long_context`, `code`, `docs`, `balanced`) with diagnostics that report the applied result limit, snippet length, hybrid threshold, candidate pool, adaptive context, and deep rerank breadth.
+
+### Changed
+- Added bounded environment overrides for search defaults so slow local model users can reduce result count, lengthen snippets, tighten hybrid precision, or tune candidate breadth without editing source.
+
+## [0.5.5] - 2026-07-23
+
+### Added
+- Added `knowledge_configure` so agents can validate and persist a Node 22+ executable for the isolated local model worker without relying on environment variables injected after OMP startup.
+
+### Fixed
+- Auto-discovers Codex bundled Windows Node runtimes under `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\*\bin\node.exe` for OMP sessions without global `node` on `PATH`.
+- Reuses persisted runtime config before falling back to process or PATH discovery, so one successful configuration survives future OMP sessions.
+
+## [0.5.4] - 2026-07-23
+
+### Fixed
+- Prevented missing Windows `node.exe` from surfacing as an uncaught `uv_spawn 'node'` failure by resolving Node before worker startup and wrapping synchronous spawn failures with model-worker diagnostics.
+- Expanded Windows Node discovery to common Node, Volta, and NVM install locations, and stripped accidental surrounding quotes from `PI_KNOWLEDGE_NODE_PATH` paths with spaces.
+
+
+## [0.5.3] - 2026-07-23
+
+### Fixed
+- Added a Windows-safe model-worker transport fallback so OMP hosts without `child_process.fork().send()` can still build local embedding knowledge bases through a stdin/stdout JSONL worker protocol.
+- Validated the isolated worker Node 22+ executable and worker file before local model startup, with clearer `PI_KNOWLEDGE_NODE_PATH` diagnostics.
+- Hardened OMP/Windows storage-path detection for `omp.exe` hosts and Windows-style home path casing.
+
+### Changed
+- Documented Windows OMP local embedding startup requirements, transport fallback behavior, and troubleshooting guidance.
+
+## [0.5.2] - 2026-07-19
+
+### Fixed
+- Updated `better-sqlite3` to 12.11.1 so Node 26 installs and native SQLite loading work (#4).
+
+## [0.5.1] - 2026-07-07
+
+### Fixed
+- Indexed PDF/DOC/DOCX files discovered during directory add and update through the document extractors instead of treating them as binary skips.
+- Skipped failed directory document extraction as `extraction_failed` without failing the whole knowledge base.
+- Required explicit `confirm: true` for public destructive `knowledge_remove` and `knowledge_clear` tool calls.
+- Aligned `path_pattern` documentation and tool guidance with the implemented substring filter behavior.
+
+## [0.5.0] - 2026-07-07
+
+### Added
+- Added route symbol extraction and exact route lookup support through `knowledge_symbol_search`.
+- Added structured `details` payloads for search diagnostics and doctor actions so agents can consume provenance and remediation codes without parsing text.
+
+### Fixed
+- Deleted vector files when knowledge bases are removed or cleared, including orphan detection in diagnostics.
+- Guarded destructive and long-running operations with stronger mutation and shutdown lifecycle checks.
+- Preserved ready knowledge bases when update cancellation happens before mutation starts, and kept partial update state from polluting symbol search.
+- Propagated cancellation through search, export, import, diagnostics, and external embedding API requests.
+
+### Changed
+- Reworked JSONL import/export around streaming I/O and bounded batches for large portable knowledge bases.
+- Improved watcher exclusions so generated, vendor, and runtime artifacts do not trigger unnecessary scans.
+- Expanded Pi/OMP release coverage with lifecycle, cancellation, watcher, symbol, tool-contract, and model-worker regressions.
+
+## [0.4.7] - 2026-07-04
+
+### Fixed
+- Avoided live SQLite statement iterators in chunk row scans so search, diagnostics, and vector rebuild paths cannot leave the database connection busy before `knowledge_update`.
+- Coalesced overlapping `knowledge_update` calls per knowledge base so watcher-triggered updates, manual updates, retries, and shutdown do not re-enter the same update flow.
+
+### Changed
+- Increased SQLite busy timeout to tolerate short-lived external contention during long indexing/update work.
+- Updated npm-facing README and package metadata to show Pi and OMP (`omp.sh`) coding-agent support.
+
+## [0.4.6] - 2026-06-26
+
+### Fixed
+- Split oversized Markdown paragraphs and code blocks into bounded chunks so external embedding servers do not receive single over-context Markdown chunks.
+- Added OpenAI-compatible embedding base URL support via `PI_KNOWLEDGE_EMBEDDING_BASE_URL` / `OPENAI_BASE_URL`.
+- Added configurable API embedding input truncation via `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` as a final context-window safety guard.
+- Surfaced embedding API failures by default instead of silently falling back to local embeddings; explicit local fallback is available with `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`.
+- Included model worker stderr in startup/exit failures to make `knowledge_add` worker crashes diagnosable.
+
+### Changed
+- Documented all runtime environment variable overrides in `docs/configuration.md`.
+- Documented Pi and OMP support boundaries, storage path resolution, and release validation expectations.
+- Wired `PI_KNOWLEDGE_OFFLINE` to disable remote Transformers.js model downloads when using a pre-populated local model cache.
+
+## [0.4.5] - 2026-06-24
+
+### Fixed
+- Deferred extension runtime imports so OMP plugin validation does not resolve native dependencies during install.
+- Added Bun-binary-safe `better-sqlite3` loading fallback for hoisted plugin dependencies.
+- Hardened lazy runtime shutdown so in-flight extension startup is disposed before Pi or OMP exits.
+
+## [0.4.4] - 2026-06-23
+
+### Fixed
+- Simplified the packaged `extension.js` entry shim while preserving the built `dist/` first, source `index.ts` fallback behavior for local development.
+
+## [0.4.3] - 2026-06-23
+
+### Fixed
+- Added a packaged `extension.js` entry shim that loads built `dist/` output when available and falls back to source during local development.
+- Fixed packaged model-worker startup so built JavaScript loads `dist/src/model-worker.js` without TypeScript strip flags while source development still uses `model-worker.ts`.
+- Added OMP-aware knowledge storage path resolution with explicit `PI_KNOWLEDGE_DIR` / `OMP_KNOWLEDGE_DIR` overrides and legacy Pi knowledge-dir preservation for the default home OMP root.
+- Fixed strict TypeScript build issues in the extension entry, engine indexing path, AST chunker, and model worker.
+
+### Changed
+- Added a real `typecheck` release gate and made `prepack` run typecheck plus build before npm packaging.
+- Updated contributor and architecture docs for the packaged `extension.js` entry, `dist/` package contents, and release validation flow.
+
+## [0.4.2] - 2026-06-18
+
+### Changed
+- Added the `pi-package` npm keyword so the published package can be discovered by Pi's package catalog.
+- Published the updated product positioning metadata introduced after v0.4.1, including local-first RAG, hybrid code/doc search, reranking, diagnostics, and large-project indexing keywords.
+
+## [0.4.1] - 2026-06-16
+
+### Fixed
+- Isolated local Transformers.js embedding and reranker models in a model worker process so Pi's TUI process no longer loads `onnxruntime-node`, fixing macOS arm64 `/quit` aborts after knowledge-base tool usage.
+- Removed the custom `knowledge_search` TUI renderer and switched warning output to plain text to avoid Pi TUI line-width render crashes.
+- Kept native ONNX idle disposal opt-in only, prioritizing stable session shutdown over aggressive memory reclamation.
+
+### Changed
+- Documented the native model lifecycle contract, the onnxruntime teardown pitfall, and the worker-based shutdown strategy in contributor and architecture docs.
+
+## [0.4.0] - 2026-06-16
+
+### Added
+- Added persisted indexing job state for long-running `knowledge_add`, `knowledge_update`, and `knowledge_import` operations. `knowledge_status` now reports operation, phase, last progress message, last progress age, processed files/chunks, skipped count, and add/remove/unchanged counts so large indexing runs do not look frozen after transient tool updates disappear.
+- Added metadata-only directory planning and chunk throughput in indexing progress so large repositories show total scannable files, skipped counts, chunks/sec, and file ETA before expensive embedding starts.
+- Added `knowledge_plan` as a no-write indexing scope inspection tool so agents can show scannable files, suggested exclusions, and technical skips before asking the user to confirm risky or low-signal text.
+- Added contextual indexing for rebuilds: embeddings and FTS now include file path, file type, heading breadcrumbs, and code symbols while keeping returned chunk content readable.
+- Added more focused rebuild-time chunking for Markdown and plain text, with reduced overlap to avoid near-duplicate retrieval units.
+- Added adaptive search mode with query-time contextual window expansion around relevant seed chunks.
+- Added balanced/strong/off diversity controls for search result reranking to reduce near-duplicate chunk clusters.
+- Added query-aware snippets so search results show the matched context instead of always showing the chunk prefix.
+- Added vector-aware redundancy scoring and overlapping adaptive window collapse for higher-diversity top results.
+- Replaced hybrid RRF scoring with normalized weighted score fusion to preserve meaningful score spread.
+- Added file-level result interleaving so README-style overview files cannot dominate top results with repeated chunks.
+- Added confidence gating for hybrid search so low-evidence garbage queries return no results instead of unrelated matches.
+- Strengthened source-file intent scoring so named modules and core implementation files outrank overview and test files when appropriate.
+- Demoted localization catalogs for implementation-oriented queries while preserving them for explicit translation or locale intent.
+- Suggested excluding generated knowledge-base evaluation reports from default directory indexing to prevent self-referential retrieval pollution, while allowing confirmed inclusion through scope overrides.
+
+### Changed
+- Reworked directory indexing policy from hard text-file blocking to suggested exclusions plus confirmed scope overrides. Risky or low-signal text such as `.env`, secret/credential-named text, generated reports, lockfiles, vendor text, build output text, and runtime/cache text is skipped by default but can be included after user confirmation with `include_suggested_text` or focused `include_paths`. Unsupported binary/non-text, oversized, unreadable, inaccessible, and unextractable files remain technical skips.
+- Persisted confirmed include/exclude scope options so `knowledge_update` preserves the same directory indexing scope instead of silently dropping user-confirmed text files.
+
+## [0.3.5] - 2026-06-15
+
+### Fixed
+- Prevented idle model disposal from running during active embedding or reranking batches, fixing `Session already disposed` during large `knowledge_add` operations.
+- Avoided ONNX native disposal during Pi `session_shutdown`, preventing macOS onnxruntime mutex crashes on session exit.
+- Allowed `knowledge_search` `kb_id` to accept either a KB UUID or exact KB name.
+- Truncated custom TUI render lines to prevent Pi crashes when search result snippets exceed terminal width.
+
+### Changed
+- Added `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` for lifecycle stress testing of embedding idle disposal.
+
+## [0.3.4] - 2026-06-15
+
+### Fixed
+- Reject duplicate `knowledge_add` names with an actionable message instead of silently creating multiple same-name knowledge bases.
+- Strengthened default directory indexing ignores for build outputs and common secret/config files.
+
+### Changed
+- Updated `knowledge_add` tool guidance to prefer one directory-level indexing call and avoid per-file indexing loops.
+
+## [0.3.3] - 2026-06-15
+
+### Changed
+- Added a mandatory async lifecycle review contract for timers, event handlers, dispose, and shutdown paths.
+- Clarified review requirements for overlap analysis, guard-state updates before await points, idempotent cleanup, and recreate-after-dispose behavior.
+
+## [0.3.2] - 2026-06-15
+
+### Fixed
+- Made local embedding and deep reranker model disposal idempotent to avoid concurrent native ONNX session teardown from idle timers and Pi `session_shutdown`.
+
+### Changed
+- Updated the onnxruntime exit-crash pitfall notes with the double-dispose race mitigation.
+
+## [0.3.1] - 2026-06-15
+
+### Fixed
+- Made watcher shutdown cover both native watchers and polling fallbacks without mutating the collection being iterated.
+- Clarified the startup-safe render component shim contract without overclaiming Pi internals.
+
+### Changed
+- Documented the difference between e2e smoke runs and release-grade PDF/DOCX fixture coverage.
+- Added agent/contributor contracts for verification-level reporting, private fixture handling, documentation alignment, and the release/publish flow.
+
+## [0.3.0] - 2026-06-15
+
+### Fixed
+- Corrected BM25 fast-mode score semantics so higher scores are consistently better after search fusion/sorting.
+- Made URL knowledge bases a first-class source type and allowed `knowledge_update` to re-fetch URL sources.
+- Threaded `AbortSignal` into incremental update embedding.
+- Fixed stale diagnostics for single-file knowledge bases.
+- Normalized `unpdf` page-array output before chunking PDF text.
+- Made JSONL import cleanup partial KBs on failure and import exported KBs as portable text sources.
+- Removed root extension runtime dependency on Pi virtual modules so Node strip-only startup smoke tests can run outside Pi.
+- Restored `knowledge_search` custom rendering with a startup-safe local TUI component shim.
+- Added polling fallback for file watching when native `fs.watch` is unavailable or fails with resource limits.
+- Updated Biome 2 configuration so `npm run check` is a working quality gate.
+
+### Added
+- Regression coverage for BM25 score direction, URL update, update cancellation, single-file diagnostics, import failure cleanup, and portable import/export behavior.
+- E2E coverage for deep rerank, external PDF/DOCX fixtures, and watcher updates without committing private fixture data.
+- Development contract notes for Pi runtime imports, source-type update behavior, portable exports, and release gates.
+
+## [0.2.2] - 2026-06-15
+
+### Fixed
+- AbortSignal now threads end-to-end (tool → engine → embedding loop)
+- Cancellation actually works during long embedding operations
+
+### Added
+- TUI custom rendering for knowledge_search (renderCall + renderResult)
+- All DESIGN.md phases complete (30/30 checkboxes)
+
+## [0.2.1] - 2026-06-15
+
+### Fixed
+- README lists all 9 tools (was missing export/import)
+- npm package includes .pi/skills/ for skill distribution
+
+## [0.2.0] - 2026-06-15
+
+### Added
+- URL indexing (fetch → HTML strip → chunk)
+- PDF text extraction (via unpdf, pure JS)
+- DOCX text extraction (via mammoth, pure JS)
+- Import/export knowledge bases (JSONL format, git-friendly)
+- Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms)
+- Pi Skill: /skill:search-docs
+- 9 tools total
+
+## [0.1.4] - 2026-06-15
+
+### Added
+- Vector memory cache (search no longer re-reads disk per query)
+- AbortSignal support in embedding (cancellable long operations)
+- Schema migration infrastructure (future-proof DB upgrades)
+- Model mismatch warning on search (suggests re-index)
+- Engine regression tests (+6, total 34)
+- README Data Storage section
+- URL indexing (knowledge_add with http/https URLs, auto HTML strip)
+- Performance benchmarks (BM25: 0.05ms, hybrid: 2.1ms, semantic: 2.0ms)
+- Pi Skill: `/skill:search-docs` for guided knowledge search
+
+### Fixed
+- walkDir skips permission-denied directories
+- DESIGN.md phases corrected
+
+## [0.1.3] - 2026-06-14
+
+### Fixed
+- Short files index correctly (single chunk fallback)
+
+## [0.1.2] - 2026-06-14
+
+### Fixed
+- Short files (<50 chars) now index correctly as a single chunk
+
+## [0.1.1] - 2026-06-14
+
+### Added
+- Java AST chunking (6 languages total: TS, JS, Python, Go, Rust, Java)
+
+## [0.1.0] - 2026-06-14
+
+### Added
+- Project scaffold and design document
+- Extension entry point with 7 tools: knowledge_add, knowledge_search, knowledge_update, knowledge_status, knowledge_show, knowledge_remove, knowledge_clear
+- SQLite storage with FTS5 full-text search (WAL mode, content-sync triggers)
+- Markdown-aware and paragraph-based chunking with camelCase/CJK pre-tokenization
+- Local embedding via @huggingface/transformers (multilingual-e5-small, 384d, lazy load + idle dispose)
+- Hybrid search: BM25 + vector cosine + Reciprocal Rank Fusion (RRF)
+- Cross-encoder reranking (mode: "deep") via ms-marco-MiniLM-L-4-v2
+- Incremental re-indexing (content-hash diff, only embeds changed chunks)
+- File watcher (fs.watch recursive + debounce, opt-in PI_KNOWLEDGE_WATCH=true)
+- Auto-injection per turn (opt-in PI_KNOWLEDGE_AUTO_INJECT=true, BM25 fast search)
+- Metadata filters in search (file_type, path_pattern)
+- Pagination (offset/limit)
+- Vector binary storage (save/load Float32Array[])
+- 25 unit tests (chunker + search pipeline)
+- Comprehensive docs: competitive analysis, kiro parity mapping, embedding models, search pipeline, chunking strategies, FTS5 tokenization, offline mode, technical decisions (ADRs), Pi extension architecture

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.db
+*.hnsw
+.pi/settings.json
+.pi/knowledge/models/
+.codebase-memory/

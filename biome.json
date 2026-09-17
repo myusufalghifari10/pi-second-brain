@@ -1,0 +1,20 @@
+{
+	"linter": {
+		"enabled": true,
+		"rules": { "recommended": true }
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"lineWidth": 120
+	},
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	},
+	"files": {
+		"includes": ["**", "!node_modules", "!dist", "!.codebase-memory"]
+	}
+}
