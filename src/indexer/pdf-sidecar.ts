@@ -7,13 +7,14 @@
 // Module state is lazy: nothing here runs at extension startup; detection is probed at most
 // once per command identity per process and conversions are cached by content hash.
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -175,7 +176,13 @@ function readCache(key: string): string | undefined {
 		if (!meta || typeof meta.engine !== "string" || (meta.converter !== "marker" && meta.converter !== "docling")) {
 			return undefined;
 		}
-		return readFileSync(mdPath, "utf-8");
+		// Re-validate the cached markdown exactly like fresh adapter output (readAdapterOutput):
+		// strict UTF-8, no NUL byte, non-trivial length. Anything else is a cache miss so the
+		// stale pair is ignored and reconversion rewrites it.
+		const markdown = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(mdPath));
+		if (markdown.includes("\0")) return undefined;
+		if (markdown.trim().length < MIN_MARKDOWN_CHARS) return undefined;
+		return markdown;
 	} catch {
 		return undefined; // corrupt/missing cache entries are cache misses, never errors
 	}
@@ -183,14 +190,25 @@ function readCache(key: string): string | undefined {
 
 function writeCache(key: string, markdown: string, meta: CacheMeta): void {
 	// Cache writes are best-effort: an unwritable cache dir must not fail an otherwise
-	// successful conversion.
+	// successful conversion. Temp files land in the same cache dir and are renamed into
+	// place md-first, json-last — a valid <key>.json is the commit marker, so an interrupted
+	// write never presents a committed half-pair, and no temp files remain after success.
+	const tempPaths: string[] = [];
 	try {
 		const dir = join(getDefaultKnowledgeDir(), "pdf-cache");
 		mkdirSync(dir, { recursive: true });
-		writeFileSync(join(dir, `${key}.md`), markdown);
-		writeFileSync(join(dir, `${key}.json`), JSON.stringify(meta));
+		const suffix = randomUUID();
+		const mdTemp = join(dir, `${key}.${suffix}.md.tmp`);
+		const metaTemp = join(dir, `${key}.${suffix}.json.tmp`);
+		tempPaths.push(mdTemp, metaTemp);
+		writeFileSync(mdTemp, markdown);
+		writeFileSync(metaTemp, JSON.stringify(meta));
+		renameSync(mdTemp, join(dir, `${key}.md`));
+		renameSync(metaTemp, join(dir, `${key}.json`));
 	} catch {
 		/* ignore */
+	} finally {
+		for (const tempPath of tempPaths) rmSync(tempPath, { force: true });
 	}
 }
 

@@ -211,13 +211,19 @@ describe("pdf sidecar engine e2e", () => {
 	});
 
 	itE5("E5: real marker_single converts the fixture to math-aware markdown", async () => {
-		// Isolated knowledge dir so the real conversion cannot be served from a cached fake.
-		process.env.PI_KNOWLEDGE_DIR = mkdtempSync(join(tmpdir(), "pk-sidecar-e5-"));
-		process.env.PI_KNOWLEDGE_PDF_ENGINE = "marker";
-		process.env.PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS = "600000";
-		const { markdown, converter } = await convertPdf(FIXTURE_PDF, resolvePdfSidecarConfig());
-		expect(converter).toBe("marker");
-		expect(markdown).toMatch(/\$\$|```math/);
-		expect(markdown).toMatch(/^#{1,6}\s/m);
+		// Isolated knowledge dir so the real conversion cannot be served from a cached fake;
+		// cleaned up in finally so the gated path never leaks the temp dir.
+		const e5Dir = mkdtempSync(join(tmpdir(), "pk-sidecar-e5-"));
+		try {
+			process.env.PI_KNOWLEDGE_DIR = e5Dir;
+			process.env.PI_KNOWLEDGE_PDF_ENGINE = "marker";
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS = "600000";
+			const { markdown, converter } = await convertPdf(FIXTURE_PDF, resolvePdfSidecarConfig());
+			expect(converter).toBe("marker");
+			expect(markdown).toMatch(/\$\$|```math/);
+			expect(markdown).toMatch(/^#{1,6}\s/m);
+		} finally {
+			rmSync(e5Dir, { recursive: true, force: true });
+		}
 	});
 });

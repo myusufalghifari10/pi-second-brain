@@ -122,10 +122,10 @@ describe("pdf sidecar", () => {
 			}
 		});
 
-		it("off is preserved verbatim so the engine can bypass everything", () => {
+		it("off is preserved verbatim so the engine can bypass everything", async () => {
 			process.env.PI_KNOWLEDGE_PDF_ENGINE = "off";
 			expect(resolvePdfSidecarConfig().engine).toBe("off");
-			expect(detectSidecar(resolvePdfSidecarConfig())).resolves.toBe("none");
+			await expect(detectSidecar(resolvePdfSidecarConfig())).resolves.toBe("none");
 		});
 
 		it("invalid timeout behaves as the default", () => {
@@ -250,6 +250,8 @@ describe("pdf sidecar", () => {
 			expect(cacheFiles).toHaveLength(2);
 			expect(cacheFiles.some((name) => name.endsWith(".md"))).toBe(true);
 			expect(cacheFiles.some((name) => name.endsWith(".json"))).toBe(true);
+			// Atomic cache write: exactly the committed pair — no temp residue.
+			expect(cacheFiles.every((name) => name.endsWith(".md") || name.endsWith(".json"))).toBe(true);
 
 			// Same bytes: no spawn, identical markdown from cache.
 			const second = await convertPdf(input, config);
@@ -269,6 +271,43 @@ describe("pdf sidecar", () => {
 			expect(doclingResult.converter).toBe("docling");
 			expect(readCounter(counter).count).toBe(5); // fresh detection probe + conversion
 			expect(readFileSyncSafe(cacheDir)).toHaveLength(6);
+		});
+	});
+
+	describe("U4b cache re-validation", () => {
+		it("truncated cached markdown with valid meta is a miss: respawns and rewrites the pair", async () => {
+			const dir = makeTempDir();
+			const kbDir = makeTempDir();
+			const counter = counterPath(dir);
+			process.env.PI_KNOWLEDGE_DIR = kbDir;
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_CMD = `${FAKE_SIDECAR} {input} {output_dir}`;
+			// Inert under the template override, but they make this test's detection-cache key
+			// unique so the first convert always probes (deterministic spawn counts).
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_MARKER_CMD = "pk-inert-marker-u4b";
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_DOCLING_CMD = "pk-inert-docling-u4b";
+			process.env.FAKE_SIDECAR_COUNTER = counter;
+			const cacheDir = join(kbDir, "pdf-cache");
+
+			const input = writeFixturePdf(dir, "paper.pdf", "revalidate probe");
+			const config: PdfSidecarConfig = resolvePdfSidecarConfig();
+
+			// First convert: detection probe + conversion spawn, valid cache pair written.
+			await convertPdf(input, config);
+			expect(readCounter(counter).count).toBe(2);
+
+			// Hand-truncate the cached markdown below MIN_MARKDOWN_CHARS while leaving the
+			// valid <key>.json commit marker in place: re-validation must treat this as a miss.
+			const staleMd = readFileSyncSafe(cacheDir).find((name) => name.endsWith(".md"));
+			if (!staleMd) throw new Error("expected a cached .md file after the first conversion");
+			writeFileSync(join(cacheDir, staleMd), "too short");
+
+			// Cache miss: the sidecar respawns and the pair is rewritten valid.
+			const refreshed = await convertPdf(input, config);
+			expect(readCounter(counter).count).toBe(3);
+			expect(refreshed.markdown.trim().length).toBeGreaterThanOrEqual(50);
+			const rewrittenMd = readFileSyncSafe(cacheDir).find((name) => name.endsWith(".md"));
+			if (!rewrittenMd) throw new Error("expected the rewritten .md cache file");
+			expect(readFileSync(join(cacheDir, rewrittenMd), "utf-8")).toBe(refreshed.markdown);
 		});
 	});
 
