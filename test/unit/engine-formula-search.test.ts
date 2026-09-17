@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { KnowledgeEngine, type SearchResponse, type SearchResult } from "../../src/engine.ts";
+import { KnowledgeEngine, kbTrustMultiplier, type SearchResponse, type SearchResult } from "../../src/engine.ts";
 import { FORMULA_BOOST } from "../../src/search/ranking.ts";
 import {
 	type ChunkInsert,
@@ -25,7 +25,9 @@ import {
 	getKB,
 	getKBByName,
 	insertChunks,
+	type KnowledgeBase,
 	openDatabase,
+	updateKBStatus,
 } from "../../src/storage/sqlite.ts";
 
 const USER_MODELS_DIR = join(getDefaultKnowledgeDir(), "models");
@@ -92,6 +94,17 @@ describe("engine formula search", () => {
 			const kb = getKBByName(db, name);
 			if (!kb) throw new Error(`kb not found: ${name}`);
 			return kb.id;
+		} finally {
+			db.close();
+		}
+	}
+
+	function getKbById(id: string): KnowledgeBase {
+		const db = openDatabase(knowledgeDir);
+		try {
+			const kb = getKB(db, id);
+			if (!kb) throw new Error(`kb not found: ${id}`);
+			return kb;
 		} finally {
 			db.close();
 		}
@@ -203,12 +216,14 @@ describe("engine formula search", () => {
 		});
 
 		it("injects the formula chunk via a normalized variant query with match_reason formula", async () => {
-			const response = await engine.search(VARIANT_QUERY, { mode: "fast", kb_id: kbIdByName("F5KB"), limit: 5 });
+			const kbId = kbIdByName("F5KB");
+			const response = await engine.search(VARIANT_QUERY, { mode: "fast", kb_id: kbId, limit: 5 });
 			const injected = firstResult(response);
 			expect(injected.provenance?.match_reason).toBe("formula");
 			expect(injected.provenance?.chunk_id).toBe(physicsChunkId);
 			expect(injected.file_path).toBe("physics.md");
-			expect(injected.score).toBeCloseTo(1, 10);
+			// Exact formula evidence scores 1.0, times the kb trust factor applied to retrieved legs.
+			expect(injected.score).toBeCloseTo(kbTrustMultiplier(getKbById(kbId)), 10);
 			expect(response.total_count).toBe(1);
 		});
 
@@ -277,6 +292,67 @@ describe("engine formula search", () => {
 			const capped = await engine.search(VARIANT_QUERY, { mode: "fast", kb_id: kbCap.kbId, limit: 10 });
 			expect(capped.results).toHaveLength(5);
 			expect(capped.results.every((result) => result.provenance?.match_reason === "formula")).toBe(true);
+		});
+
+		it("injects filter-passing matches beyond the top-5 when higher-ranked candidates fail the filter", async () => {
+			// Ranks 1-5 hold exact-match markdown chunks (formulaScore 1.0); the python chunk only
+			// fuzzy-matches the query (formulaScore < 1.0), so it sits at rank 6. With
+			// file_type=python the pre-fix cap-then-filter order sliced the top-5 (all markdown)
+			// and injected nothing; filter-first ordering must inject the rank-6 chunk instead.
+			const chunks = Array.from({ length: 5 }, () => seededChunk());
+			chunks.push(
+				seededChunk({
+					file_path: "calc.py",
+					file_type: "python",
+					content: "def calc(): pass",
+					content_tokenized: "def calc pass",
+					metadata_json: JSON.stringify({ formulas: ["$E=mc^{3}$"] }),
+				}),
+			);
+			const { kbId, chunkIds } = await createSeededKb("F6Underfill", chunks);
+			const pythonChunkId = chunkIds[5];
+			if (!pythonChunkId) throw new Error("expected 6 seeded chunks");
+
+			const response = await engine.search(VARIANT_QUERY, {
+				mode: "fast",
+				kb_id: kbId,
+				filters: { file_type: "python" },
+				limit: 10,
+			});
+
+			expect(response.results).toHaveLength(1);
+			expect(response.results[0]?.provenance?.match_reason).toBe("formula");
+			expect(response.results[0]?.provenance?.chunk_id).toBe(pythonChunkId);
+		});
+	});
+
+	describe("injected formula scores apply the kb trust multiplier", () => {
+		it("multiplies injected scores by kbTrustMultiplier: stale kb below ready baseline", async () => {
+			const { kbId, chunkIds } = await createSeededKb("F6TrustReady", [seededChunk()]);
+			const chunkId = chunkIds[0];
+			if (!chunkId) throw new Error("expected 1 seeded chunk");
+
+			const ready = await engine.search(VARIANT_QUERY, { mode: "fast", kb_id: kbId, limit: 5 });
+			const readyInjected = firstResult(ready);
+			expect(readyInjected.provenance?.chunk_id).toBe(chunkId);
+			expect(readyInjected.provenance?.match_reason).toBe("formula");
+			// Exact formula evidence (1.0) × the same trust factor every retrieved leg applies.
+			expect(readyInjected.score).toBeCloseTo(kbTrustMultiplier(getKbById(kbId)), 10);
+
+			// Search skips non-ready KBs entirely, so "stale" is the non-ready state reachable here.
+			const db = openDatabase(knowledgeDir);
+			try {
+				updateKBStatus(db, kbId, "stale");
+			} finally {
+				db.close();
+			}
+
+			const stale = await engine.search(VARIANT_QUERY, { mode: "fast", kb_id: kbId, limit: 5 });
+			const staleInjected = firstResult(stale);
+			expect(staleInjected.provenance?.chunk_id).toBe(chunkId);
+			expect(staleInjected.provenance?.match_reason).toBe("formula");
+			expect(staleInjected.score).toBeCloseTo(kbTrustMultiplier(getKbById(kbId)), 10);
+			expect(staleInjected.score).toBeLessThan(readyInjected.score);
 		});
 	});
 

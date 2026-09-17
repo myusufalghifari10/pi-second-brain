@@ -356,7 +356,7 @@ function sourceMtimeFor(kb: KnowledgeBase | undefined, filePath: string): number
 	}
 }
 
-function kbTrustMultiplier(kb: KnowledgeBase): number {
+export function kbTrustMultiplier(kb: KnowledgeBase): number {
 	let multiplier = kb.status === "stale" ? 0.92 : 1;
 	if (kb.source_type === "directory" || kb.source_type === "file") multiplier *= 1.04;
 	if (kb.source_type === "text" || kb.source_type === "url") multiplier *= 0.98;
@@ -1996,22 +1996,29 @@ export class KnowledgeEngine {
 		}
 
 		// Layer 3 injection leg (spec §3.4.5): formula candidates absent from the retrieved set
-		// become real results with match_reason "formula" — capped, sorted by formula score desc,
-		// respecting kb scope and metadata filters, and bypassing MIN_HYBRID_SCORE (ratified:
-		// formula evidence is not a lexical-prose score).
+		// become real results with match_reason "formula" — filter-first, then capped, sorted by
+		// formula score desc, respecting kb scope and metadata filters, and bypassing
+		// MIN_HYBRID_SCORE (ratified: formula evidence is not a lexical-prose score). Injected
+		// scores carry the same kbTrustMultiplier as every retrieved leg so cross-kb comparison
+		// stays consistent.
 		if (queryFormulas.formulas.length > 0 && formulaScores.size > 0) {
 			const retrievedIds = new Set(unique.map((result) => result.chunkId));
-			const injected = [...formulaScores.entries()]
+			const candidates = [...formulaScores.entries()]
 				.filter(([chunkId]) => !retrievedIds.has(chunkId))
-				.sort((a, b) => b[1] - a[1])
-				.slice(0, FORMULA_INJECTION_LIMIT);
-			for (const [chunkId, formulaScore] of injected) {
+				.sort((a, b) => b[1] - a[1]);
+			// Cap counts candidates that pass kb scope + metadata filters, so top-5 filter misses
+			// cannot starve filter-passing matches at lower ranks.
+			let injectedCount = 0;
+			for (const [chunkId, formulaScore] of candidates) {
+				if (injectedCount >= FORMULA_INJECTION_LIMIT) break;
 				const chunk = getChunkById(db, chunkId);
-				if (!chunk || !kbById.has(chunk.kb_id)) continue;
+				const kb = chunk ? kbById.get(chunk.kb_id) : undefined;
+				if (!chunk || !kb) continue;
 				if (normalizedFileType && chunk.file_type !== normalizedFileType) continue;
 				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) continue;
 				formulaInjectedChunkIds.add(chunkId);
-				filtered.push({ chunkId, score: formulaScore });
+				filtered.push({ chunkId, score: formulaScore * kbTrustMultiplier(kb) });
+				injectedCount += 1;
 			}
 			if (formulaInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
 		}
