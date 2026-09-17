@@ -32,7 +32,7 @@ import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
-import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
+import { tokenizeForSearch } from "./search/query.ts";
 import {
 	hasAnyLexicalEvidence,
 	hasEnoughLexicalEvidence,
@@ -1652,7 +1652,6 @@ export class KnowledgeEngine {
 		const { mode = "hybrid", offset = 0, kb_id, filters, diversity = "balanced" } = options;
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
-		const normalizedQuery = normalizedQueryText(query);
 		const queryTokens = tokenizeForSimilarity(query);
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
 
@@ -1699,12 +1698,10 @@ export class KnowledgeEngine {
 
 			if (retrievalMode === "fast") {
 				allResults.push(
-					...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id, { allowOrFallback: false }).map(
-						(result) => ({
-							...result,
-							score: result.score * kbTrustMultiplier(kb),
-						}),
-					),
+					...searchBM25(db, query, candidateLimit, kb.id, { allowOrFallback: false }).map((result) => ({
+						...result,
+						score: result.score * kbTrustMultiplier(kb),
+					})),
 				);
 			} else if (retrievalMode === "semantic") {
 				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
@@ -1725,7 +1722,7 @@ export class KnowledgeEngine {
 				);
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
-				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
+				const bm25Results = searchBM25(db, query, candidateLimit, kb.id);
 				if (bm25Results.length === 0) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
