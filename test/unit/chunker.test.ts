@@ -2,6 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	analyzeIndexableContent,
 	buildChunkEmbeddingText,
 	chunkFile,
 	chunkIdentityHash,
@@ -497,5 +498,66 @@ describe("chunkLaTeX", () => {
 		const chunks = chunkLaTeX("\\documentclass{article}", "tiny.tex");
 		expect(chunks).toHaveLength(1);
 		expect(chunks[0].file_type).toBe("latex");
+	});
+});
+
+describe("chunkFile pdf sidecar threading", () => {
+	const sidecarMarkdown = [
+		"## Section One",
+		"",
+		"Mass-energy equivalence is written as $$E = mc^2$$ in display math notation for testing.",
+		"",
+		"## Section Two",
+		"",
+		"Additional prose making the second section long enough to pass the chunk threshold easily.",
+	].join("\n");
+
+	it("T1: markdown override on a .pdf keeps file_type pdf, threads converter metadata, and renders the Converter prefix", async () => {
+		const chunks = await chunkFile(sidecarMarkdown, "paper.pdf", {
+			fileTypeOverride: "markdown",
+			extraMetadata: { converter: "marker" },
+		});
+		expect(chunks.length).toBeGreaterThanOrEqual(2);
+		for (const chunk of chunks) {
+			expect(chunk.file_type).toBe("pdf");
+			expect(JSON.parse(chunk.metadata_json).converter).toBe("marker");
+		}
+		const first = JSON.parse(chunks[0].metadata_json);
+		expect(first.breadcrumb).toBe("Section One");
+		expect(buildChunkEmbeddingText(chunks[0])).toContain("Converter: marker");
+	});
+
+	it("T2: chunkFile on a .pdf without override is byte-identical to the chunkText fallback", async () => {
+		const text = Array(15).fill("A paragraph with enough meaningful content for testing purposes here.").join("\n\n");
+		const viaChunkFile = await chunkFile(text, "data.pdf");
+		const viaChunkText = chunkText(text, "data.pdf");
+		expect(viaChunkFile).toEqual(viaChunkText);
+	});
+
+	it("T3: chunkMarkdown default params reproduce existing behavior exactly", () => {
+		const md = "## Heading\n\nContent for the heading that is long enough to pass the minimum threshold.";
+		expect(chunkMarkdown(md, "note.md")).toEqual(chunkMarkdown(md, "note.md", "markdown", {}));
+	});
+
+	it("T4: latex override on a .pdf routes to chunkLaTeX (mechanism proof)", async () => {
+		const latex =
+			"\\section{Alpha}\n\nBody text about the alpha section that easily exceeds fifty characters in length.\n";
+		const chunks = await chunkFile(latex, "paper.pdf", { fileTypeOverride: "latex" });
+		expect(chunks.length).toBeGreaterThan(0);
+		expect(chunks[0].file_type).toBe("latex");
+		expect(JSON.parse(chunks[0].metadata_json).breadcrumb).toBe("Alpha");
+	});
+
+	it("Amendment B: a non-routing extractor label does not demote extension-detected markdown routing", async () => {
+		const md = "## Heading\n\nContent for the heading that is long enough to pass the minimum threshold.";
+		// analyzeIndexableContent receives an extraction-level "text" label for a detected .md file.
+		const analysis = await analyzeIndexableContent(md, "note.md", "text", { converter: "marker" });
+		expect(analysis.chunks.length).toBeGreaterThan(0);
+		expect(analysis.chunks[0].file_type).toBe("markdown");
+		expect(JSON.parse(analysis.chunks[0].metadata_json).breadcrumb).toBe("Heading");
+		expect(JSON.parse(analysis.chunks[0].metadata_json).converter).toBe("marker");
+		// Same protection at the chunkFile layer for a direct non-routing override.
+		const direct = await chunkFile(md, "note.md", { fileTypeOverride: "text", extraMetadata: { converter: "marker" } });
+		expect(direct).toEqual(chunkMarkdown(md, "note.md", "markdown", { converter: "marker" }));
 	});
 });

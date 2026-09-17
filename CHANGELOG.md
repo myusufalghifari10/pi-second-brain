@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- Added optional PDF extraction through an external converter sidecar (marker primary, docling alternative; `pip install marker-pdf` / `pip install docling`). Scientific PDFs are converted to Markdown with `$$…$$` math and flow through the math-aware chunking pipeline with formula blocks, headings, and table protection intact; chunks keep `file_type: pdf` for filters and record their converter in chunk metadata and a `Converter:` context line. The sidecar is strictly optional and fail-open: when absent, failing, or timing out, extraction falls back silently to the previous text-layer path, and failed conversions are reported as `pdf_sidecar_failed` scan statistics. Configure via `PI_KNOWLEDGE_PDF_ENGINE`, `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS`, `PI_KNOWLEDGE_PDF_SIDECAR_MARKER_CMD`, `PI_KNOWLEDGE_PDF_SIDECAR_DOCLING_CMD`, and the `PI_KNOWLEDGE_PDF_SIDECAR_CMD` argv-template escape hatch.
+- Added a content-hash conversion cache under `<knowledge-dir>/pdf-cache/` keyed by PDF bytes, engine, and adapter version, so `knowledge_update` never re-runs an expensive conversion for an unchanged PDF. Reset with `rm -rf <knowledge-dir>/pdf-cache`.
 - Added math and science-aware chunking for Markdown and LaTeX knowledge bases. Display math (`$$`, ` ```math ` fences, `\begin{equation}`-family environments, `\[..\]`), pipe tables, and fenced code are atomic chunking units that are never split mid-structure, and oversized blocks split only at row/line boundaries.
 - Added cross-notation math matching: `preTokenizeForFTS` canonicalizes math unicode (Greek letters, operators, relations, arrows, super/subscripts) onto LaTeX command words, so `x²`, `x^2`, `α`, and `\alpha` all hit the same FTS terms, symmetrically for index and query.
 - Added Obsidian-style vault metadata for Markdown chunks: frontmatter `title`/`tags`/`aliases`, `[[wikilinks]]`, and per-chunk display-formula excerpts become chunk metadata and embedding context lines.
@@ -11,6 +13,9 @@
 
 ### Changed
 - Markdown and LaTeX chunks hash differently after this change; run `knowledge_update` once after upgrading so affected Markdown/LaTeX files re-chunk and re-embed. Other file types keep their existing chunk hashes and vectors.
+
+### Fixed
+- Fixed `knowledge_search` fast and hybrid BM25 modes dropping canonical math composite tokens: queries were normalized twice, so `mc²` collapsed to `mc pow` instead of matching `mc pow2` in the index. Math-notation queries (for example `mc²` finding `E = mc^2`) now work through the engine search path; direct `searchBM25` callers were unaffected.
 
 ## [0.10.1] - 2026-09-10
 

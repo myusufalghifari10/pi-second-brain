@@ -141,7 +141,14 @@ export interface ScannableFile {
 
 export interface SkippedScanEntry {
 	path: string;
-	reason: "suggested_excluded" | "oversized" | "binary" | "unreadable" | "inaccessible" | "extraction_failed";
+	reason:
+		| "suggested_excluded"
+		| "oversized"
+		| "binary"
+		| "unreadable"
+		| "inaccessible"
+		| "extraction_failed"
+		| "pdf_sidecar_failed";
 	size?: number;
 }
 
@@ -166,6 +173,7 @@ export function createSkippedScanStats(): ScanResult["skipped"] {
 			unreadable: 0,
 			inaccessible: 0,
 			extraction_failed: 0,
+			pdf_sidecar_failed: 0,
 		},
 		samples: [],
 	};
@@ -493,6 +501,8 @@ function buildContextPrefix(filePath: string, fileType: string, metadata: ChunkM
 	if (links.length > 0) metadataLines.push(`Links: ${links.join(", ")}`);
 	if (labels.length > 0) metadataLines.push(`Labels: ${labels.join(", ")}`);
 	if (formulaLine) metadataLines.push(`Formulas: ${formulaLine}`);
+	const converter = typeof metadata.converter === "string" ? metadata.converter : "";
+	if (converter) metadataLines.push(`Converter: ${converter}`);
 	let guardedChars = 0;
 	for (const line of metadataLines) {
 		if (guardedChars + line.length > CONTEXT_PREFIX_MAX_CHARS) break;
@@ -679,7 +689,12 @@ function assembleChunkBlocks(
 	flushBuffer();
 }
 
-export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInsert, "kb_id">[] {
+export function chunkMarkdown(
+	content: string,
+	filePath: string,
+	fileType: string = "markdown",
+	extraMetadata: ChunkMetadata = {},
+): Omit<ChunkInsert, "kb_id">[] {
 	const frontmatter = parseFrontmatter(content);
 	const body =
 		frontmatter.bodyStartLine > 1
@@ -709,7 +724,10 @@ export function chunkMarkdown(content: string, filePath: string): Omit<ChunkInse
 		if (frontmatter.aliases.length > 0) metadata.aliases = frontmatter.aliases;
 		if (links.length > 0) metadata.links = links;
 		if (formulas.length > 0) metadata.formulas = formulas;
-		chunks.push(makeChunk(text.trim(), filePath, "markdown", start + lineBase, end + lineBase, metadata));
+		for (const [key, value] of Object.entries(extraMetadata)) {
+			if (value !== undefined) metadata[key] = value;
+		}
+		chunks.push(makeChunk(text.trim(), filePath, fileType, start + lineBase, end + lineBase, metadata));
 	}
 
 	function flush(endLine: number): void {
@@ -913,6 +931,7 @@ export async function analyzeIndexableContent(
 	content: string,
 	filePath: string,
 	fileType = detectFileType(filePath),
+	extraMetadata?: ChunkMetadata,
 ): Promise<{
 	chunks: Omit<ChunkInsert, "kb_id">[];
 	symbols: KnowledgeSymbolInsert[];
@@ -930,7 +949,19 @@ export async function analyzeIndexableContent(
 			/* fallback below */
 		}
 	}
-	return { chunks: await chunkFile(content, filePath), symbols: extractSymbols(content, filePath, analysisFileType) };
+	// Only forward the override when it names a routing type (markdown/latex) that differs
+	// from extension detection: extractor labels like "text" (for .md files) must not demote
+	// a detected markdown file to the plain-text chunker.
+	const overridesRouting =
+		(analysisFileType === "markdown" || analysisFileType === "latex") && analysisFileType !== detectedFileType;
+	return {
+		chunks: await chunkFile(
+			content,
+			filePath,
+			overridesRouting ? { fileTypeOverride: analysisFileType, extraMetadata } : { extraMetadata },
+		),
+		symbols: extractSymbols(content, filePath, analysisFileType),
+	};
 }
 
 function dedupeSymbols(symbols: KnowledgeSymbolInsert[]): KnowledgeSymbolInsert[] {
@@ -951,18 +982,31 @@ function dedupeSymbols(symbols: KnowledgeSymbolInsert[]): KnowledgeSymbolInsert[
 	return deduped;
 }
 
-export async function chunkFile(content: string, filePath: string): Promise<Omit<ChunkInsert, "kb_id">[]> {
-	const fileType = detectFileType(filePath);
+export async function chunkFile(
+	content: string,
+	filePath: string,
+	options?: { fileTypeOverride?: string; extraMetadata?: ChunkMetadata },
+): Promise<Omit<ChunkInsert, "kb_id">[]> {
+	const detectedFileType = detectFileType(filePath);
+	// Route on the override only when it names a routing type (markdown/latex) that differs from
+	// extension detection: a sidecar-converted PDF arrives as markdown but must keep its detected
+	// "pdf" file type, and non-routing extractor labels ("text", "pdf") must never demote routing.
+	const overrideIsRouting = options?.fileTypeOverride === "markdown" || options?.fileTypeOverride === "latex";
+	const override =
+		options?.fileTypeOverride && overrideIsRouting && options.fileTypeOverride !== detectedFileType
+			? options.fileTypeOverride
+			: undefined;
+	const fileType = override ?? detectedFileType;
 	let chunks: Omit<ChunkInsert, "kb_id">[] = [];
 
 	if (fileType === "markdown") {
-		chunks = chunkMarkdown(content, filePath);
+		chunks = chunkMarkdown(content, filePath, detectedFileType, options?.extraMetadata);
 	} else if (fileType === "latex") {
 		chunks = chunkLaTeX(content, filePath);
-	} else if (isCodeFileType(fileType)) {
+	} else if (isCodeFileType(detectedFileType)) {
 		try {
 			const { chunkWithAST } = await import("./chunkers/code-ast.ts");
-			chunks = await chunkWithAST(content, filePath, fileType);
+			chunks = await chunkWithAST(content, filePath, detectedFileType);
 		} catch {
 			/* fallback below */
 		}
@@ -972,7 +1016,7 @@ export async function chunkFile(content: string, filePath: string): Promise<Omit
 
 	// Fallback: if file has content but no chunks (too short for splitting), keep as single chunk
 	if (chunks.length === 0 && content.trim().length > 10) {
-		chunks = [makeChunk(content.trim(), filePath, fileType, 1, content.split("\n").length)];
+		chunks = [makeChunk(content.trim(), filePath, detectedFileType, 1, content.split("\n").length)];
 	}
 
 	return chunks;

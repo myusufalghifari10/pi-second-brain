@@ -28,6 +28,7 @@ import {
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
+import { convertPdf, detectSidecar, resolvePdfSidecarConfig, SidecarError } from "./indexer/pdf-sidecar.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
@@ -724,20 +725,60 @@ function normalizeExtractedText(text: string | string[]): string {
 interface ExtractedSourceFile {
 	content: string;
 	fileType: string;
+	/** Set when a PDF was converted to markdown by an external sidecar. */
+	sourceFormat?: "pdf";
+	/** Sidecar converter that produced the content ("marker" | "docling"); absent for unpdf. */
+	converter?: string;
 }
 
-async function extractSourceFileContent(filePath: string, signal?: AbortSignal): Promise<ExtractedSourceFile> {
+function sidecarMetadata(extracted: ExtractedSourceFile): { converter: string } | undefined {
+	return extracted.converter ? { converter: extracted.converter } : undefined;
+}
+
+// PDFs go through the optional external converter sidecar first (marker/docling, producing
+// math-aware markdown); any sidecar failure is fail-open and falls back to unpdf silently,
+// recording a pdf_sidecar_failed scan entry when scan stats are available.
+async function extractPdfSourceFileContent(
+	filePath: string,
+	signal?: AbortSignal,
+	skipped?: ReturnType<typeof createSkippedScanStats>,
+): Promise<ExtractedSourceFile> {
+	const config = resolvePdfSidecarConfig();
+	if (config.engine !== "off") {
+		try {
+			const sidecar = await detectSidecar(config);
+			if (sidecar !== "none") {
+				const { markdown, converter } = await convertPdf(filePath, config, signal);
+				return { content: markdown, fileType: "markdown", sourceFormat: "pdf", converter };
+			}
+		} catch (error) {
+			if (signal?.aborted || isCancellationError(error)) throw error;
+			if (error instanceof SidecarError) {
+				if (skipped) addSkippedScanEntry(skipped, { path: filePath, reason: "pdf_sidecar_failed" });
+			} else {
+				throw error;
+			}
+		}
+	}
+	throwIfAborted(signal);
+	// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
+	const { extractText } = await import("unpdf");
+	throwIfAborted(signal);
+	const buf = readFileSync(filePath);
+	throwIfAborted(signal);
+	const { text } = await extractText(new Uint8Array(buf));
+	throwIfAborted(signal);
+	return { content: normalizeExtractedText(text), fileType: "pdf" };
+}
+
+async function extractSourceFileContent(
+	filePath: string,
+	signal?: AbortSignal,
+	skipped?: ReturnType<typeof createSkippedScanStats>,
+): Promise<ExtractedSourceFile> {
 	const lowerPath = filePath.toLowerCase();
 	if (lowerPath.endsWith(".pdf")) {
-		throwIfAborted(signal);
-		// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
-		const { extractText } = await import("unpdf");
-		throwIfAborted(signal);
-		const buf = readFileSync(filePath);
-		throwIfAborted(signal);
-		const { text } = await extractText(new Uint8Array(buf));
-		throwIfAborted(signal);
-		return { content: normalizeExtractedText(text), fileType: "pdf" };
+		return extractPdfSourceFileContent(filePath, signal, skipped);
 	}
 	if (lowerPath.endsWith(".docx") || lowerPath.endsWith(".doc")) {
 		throwIfAborted(signal);
@@ -789,8 +830,12 @@ function classifySource(source: string): ClassifiedSource {
 	};
 }
 
-async function extractScannableFileContent(file: ScannableFile, signal?: AbortSignal): Promise<ExtractedSourceFile> {
-	return extractSourceFileContent(file.path, signal);
+async function extractScannableFileContent(
+	file: ScannableFile,
+	signal?: AbortSignal,
+	skipped?: ReturnType<typeof createSkippedScanStats>,
+): Promise<ExtractedSourceFile> {
+	return extractSourceFileContent(file.path, signal, skipped);
 }
 
 async function extractScannableFileContentOrSkip(
@@ -799,7 +844,7 @@ async function extractScannableFileContentOrSkip(
 	signal?: AbortSignal,
 ): Promise<ExtractedSourceFile | undefined> {
 	try {
-		return await extractScannableFileContent(file, signal);
+		return await extractScannableFileContent(file, signal, skipped);
 	} catch (error) {
 		if (signal?.aborted || isCancellationError(error)) throw error;
 		addSkippedScanEntry(skipped, { path: file.relPath, reason: "extraction_failed", size: file.size });
@@ -1105,8 +1150,9 @@ export class KnowledgeEngine {
 				content: string,
 				filePath: string,
 				fileType: string,
+				extraMetadata?: { converter: string },
 			): Promise<Omit<ChunkInsert, "kb_id">[]> => {
-				const analysis = await analyzeIndexableContent(content, filePath, fileType);
+				const analysis = await analyzeIndexableContent(content, filePath, fileType, extraMetadata);
 				insertSymbols(db, kb.id, analysis.symbols);
 				return analysis.chunks;
 			};
@@ -1122,7 +1168,12 @@ export class KnowledgeEngine {
 			} else if (isFile) {
 				const extracted = await extractSourceFileContent(resolvedSource, signal);
 				fileCount = 1;
-				const chunks = await analyzeAndAddSymbols(extracted.content, resolvedSource, extracted.fileType);
+				const chunks = await analyzeAndAddSymbols(
+					extracted.content,
+					resolvedSource,
+					extracted.fileType,
+					sidecarMetadata(extracted),
+				);
 				await addChunks(chunks);
 			} else if (isDir) {
 				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
@@ -1153,7 +1204,12 @@ export class KnowledgeEngine {
 						latestSkippedTotal = skipped.total;
 						continue;
 					}
-					const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
+					const chunks = await analyzeAndAddSymbols(
+						extracted.content,
+						file.relPath,
+						extracted.fileType,
+						sidecarMetadata(extracted),
+					);
 					processedFiles++;
 					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
@@ -1429,7 +1485,12 @@ export class KnowledgeEngine {
 					if (signal?.aborted) throw new Error("Cancelled");
 					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
 					if (!extracted) continue;
-					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
+					const analysis = await analyzeIndexableContent(
+						extracted.content,
+						file.relPath,
+						extracted.fileType,
+						sidecarMetadata(extracted),
+					);
 					scannedFiles++;
 					stagedSymbols.push(...analysis.symbols);
 					await processChunks(analysis.chunks);
@@ -1465,7 +1526,12 @@ export class KnowledgeEngine {
 			} else {
 				const extracted = await extractSourceFileContent(kb.source_path, signal);
 				scannedFiles = 1;
-				const analysis = await analyzeIndexableContent(extracted.content, kb.source_path, extracted.fileType);
+				const analysis = await analyzeIndexableContent(
+					extracted.content,
+					kb.source_path,
+					extracted.fileType,
+					sidecarMetadata(extracted),
+				);
 				stagedSymbols.push(...analysis.symbols);
 				await processChunks(analysis.chunks);
 			}
