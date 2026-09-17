@@ -4,6 +4,10 @@ import { signalTokens, tokenizeForSearch } from "./query.ts";
 
 export const MIN_HYBRID_SCORE = 0.18;
 
+// Layer 3 formula fusion (spec §3.4 of docs/layer3-formula-retrieval-plan.md): applied once
+// per already-retrieved chunk as score += FORMULA_BOOST * formulaScore (formulaScore in [0,1]).
+export const FORMULA_BOOST = 0.35;
+
 export const FILE_TYPE_ALIASES: Record<string, string> = {
 	csharp: "csharp",
 	cs: "csharp",

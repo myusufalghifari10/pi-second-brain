@@ -28,6 +28,7 @@ import {
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
+import { extractQueryFormulas, type NormalizedFormula, normalizeFormula } from "./indexer/formula-normalize.ts";
 import { convertPdf, detectSidecar, resolvePdfSidecarConfig, SidecarError } from "./indexer/pdf-sidecar.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
@@ -35,6 +36,7 @@ import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
 import { tokenizeForSearch } from "./search/query.ts";
 import {
+	FORMULA_BOOST,
 	hasAnyLexicalEvidence,
 	hasEnoughLexicalEvidence,
 	normalizeFileTypeFilter,
@@ -56,8 +58,10 @@ import {
 	countSymbols,
 	createKB,
 	deleteChunksByIds,
+	deleteFormulasForChunks,
 	deleteKB,
 	deleteSymbolsByKB,
+	findExactFormulas,
 	finishIndexingJob,
 	getChunkById,
 	getChunkCount,
@@ -72,8 +76,12 @@ import {
 	iterateChunksByKB,
 	type KnowledgeBase,
 	type KnowledgeSymbol,
+	listChunksForFormulaBackfill,
 	listKBs,
+	markFormulaIndexBuilt,
 	openDatabase,
+	replaceFormulasForChunk,
+	searchFormulasFTS,
 	searchSymbols,
 	startIndexingJob,
 	updateIndexingJob,
@@ -121,7 +129,7 @@ export interface SearchResult {
 		indexed_at: number;
 		source_mtime?: number;
 		stale: boolean;
-		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive";
+		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive" | "formula";
 		source_chunk_ids?: string[];
 	};
 }
@@ -235,6 +243,9 @@ export interface SymbolSearchResponse {
 
 const INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
+// Layer 3 fuzzy formula leg (spec §3.4.3): top-ranked FTS hit gets 0.8, rank-normalized below.
+const FORMULA_FUZZY_TOP_SCORE = 0.8;
+const FORMULA_INJECTION_LIMIT = 5;
 
 interface DirectoryScanPlan {
 	files: number;
@@ -899,6 +910,67 @@ function importedChunkToInsert(chunk: ImportedChunk): ChunkInsert {
 	};
 }
 
+// Layer 3 formula index (spec §3.3 of docs/layer3-formula-retrieval-plan.md): rows are computed
+// from chunk metadata already in memory and written PRE-normalized via replaceFormulasForChunk.
+// Parse/normalize failures yield no rows — formula features fail open, never the mutation.
+function formulaRowsFromMetadataJson(metadataJson: string): Array<{
+	ordinal: number;
+	raw: string;
+	normalized: string;
+	tokenCount: number;
+}> {
+	try {
+		const parsed = JSON.parse(metadataJson) as { formulas?: unknown };
+		if (!parsed || !Array.isArray(parsed.formulas)) return [];
+		const rows: Array<{ ordinal: number; raw: string; normalized: string; tokenCount: number }> = [];
+		for (const raw of parsed.formulas) {
+			if (typeof raw !== "string") continue;
+			const normalized = normalizeFormula(raw);
+			if (!normalized) continue;
+			rows.push({
+				ordinal: rows.length,
+				raw: normalized.raw,
+				normalized: normalized.normalized,
+				tokenCount: normalized.tokenCount,
+			});
+		}
+		return rows;
+	} catch {
+		return [];
+	}
+}
+
+function writeFormulaRowsForInsertedChunks(
+	db: Database.Database,
+	kbId: string,
+	chunkIds: string[],
+	chunks: ChunkInsert[],
+): void {
+	for (let i = 0; i < chunks.length; i++) {
+		try {
+			replaceFormulasForChunk(db, kbId, chunkIds[i], formulaRowsFromMetadataJson(chunks[i].metadata_json));
+		} catch {
+			// fail-open: formula features stay dormant for this chunk
+		}
+	}
+}
+
+// FTS query for the fuzzy formula leg: quoted OR-joined canonical tokens, following the
+// bm25.ts quoted-term discipline (raw user text is never passed as FTS syntax).
+// searchFormulasFTS re-validates the shape and reduces anything else to a safe phrase.
+function buildFormulaFtsQuery(formulas: NormalizedFormula[]): string {
+	const seen = new Set<string>();
+	const terms: string[] = [];
+	for (const formula of formulas) {
+		for (const token of formula.tokens) {
+			if (token.includes('"') || seen.has(token)) continue;
+			seen.add(token);
+			terms.push(`"${token}"`);
+		}
+	}
+	return terms.join(" OR ");
+}
+
 async function writeLine(stream: WriteStream, line: string): Promise<void> {
 	if (stream.write(`${line}\n`)) return;
 	await new Promise<void>((resolve, reject) => {
@@ -944,6 +1016,8 @@ export class KnowledgeEngine {
 	private knowledgeDir: string = "";
 	private activeUpdates = new Map<string, Promise<{ added: number; removed: number; unchanged: number }>>();
 	private activeMutations = new Map<string, Promise<unknown>>();
+	// Layer 3 in-process backfill guard (complements knowledge_bases.formula_index_built).
+	private formulaIndexesEnsured = new Set<string>();
 	private disposing = false;
 
 	private runExclusive<T>(keys: string | string[], description: string, operation: () => Promise<T> | T): Promise<T> {
@@ -975,6 +1049,30 @@ export class KnowledgeEngine {
 
 	private deleteVectorFile(kbId: string): void {
 		rmSync(this.vectorPathFor(kbId), { force: true });
+	}
+
+	// Layer 3 backfill (spec §3.3): runs once per kb per process, guarded persistently by
+	// knowledge_bases.formula_index_built and in-process by formulaIndexesEnsured. Never throws:
+	// on failure formula features stay dormant for the rest of the process, all else unchanged.
+	private ensureFormulaIndexesBuilt(kbIds: string[]): void {
+		if (!this.db) return;
+		for (const kbId of kbIds) {
+			if (this.formulaIndexesEnsured.has(kbId)) continue;
+			this.formulaIndexesEnsured.add(kbId);
+			try {
+				const kb = getKB(this.db, kbId);
+				if (!kb || kb.formula_index_built === 1) continue;
+				for (const chunk of listChunksForFormulaBackfill(this.db)) {
+					if (chunk.kb_id !== kbId) continue;
+					const rows = formulaRowsFromMetadataJson(chunk.metadata_json);
+					if (rows.length === 0) continue;
+					replaceFormulasForChunk(this.db, kbId, chunk.id, rows);
+				}
+				markFormulaIndexBuilt(this.db, kbId);
+			} catch {
+				// fail-open: retrying is intentionally skipped for this process
+			}
+		}
 	}
 
 	plan(source: string, options: AddOptions = {}, signal?: AbortSignal): IndexPlan {
@@ -1067,6 +1165,9 @@ export class KnowledgeEngine {
 		});
 		updateKBStatus(db, kb.id, "indexing");
 		startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
+		// Layer 3 (spec §3.3): the add path ensures the (fresh) kb's formula flag up front; the
+		// per-batch writes below keep formula rows in sync with every inserted chunk.
+		this.ensureFormulaIndexesBuilt([kb.id]);
 
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
@@ -1126,7 +1227,8 @@ export class KnowledgeEngine {
 				if (signal?.aborted) throw new Error("Cancelled");
 				assertEmbeddingBatchSize(vectors, batch.length, "add");
 				persistEmbeddingMetadata(db, kb.id, embeddingConfig, vectors);
-				insertChunks(db, kb.id, batch);
+				const insertedIds = insertChunks(db, kb.id, batch);
+				writeFormulaRowsForInsertedChunks(db, kb.id, insertedIds, batch);
 				writer.append(vectors);
 				chunkCount += batch.length;
 				updateKBCounts(db, kb.id, chunkCount, fileCount);
@@ -1420,7 +1522,9 @@ export class KnowledgeEngine {
 					newVectorIndexByHash.set(batch[i].content_hash, indexes);
 				}
 				addedVectorCount += newVectors.length;
-				insertedChunkIds.push(...insertChunks(this.db, kb.id, batch));
+				const insertedIds = insertChunks(this.db, kb.id, batch);
+				insertedChunkIds.push(...insertedIds);
+				writeFormulaRowsForInsertedChunks(this.db, kb.id, insertedIds, batch);
 				addedCount += batch.length;
 				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 				const storedMessage = `Stored update batch: +${addedCount} chunks, =${unchanged} unchanged`;
@@ -1624,7 +1728,10 @@ export class KnowledgeEngine {
 			replacementVectorPath = undefined;
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			addedVectorPath = undefined;
-			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
+			if (idsToRemove.length > 0) {
+				deleteFormulasForChunks(this.db, idsToRemove);
+				deleteChunksByIds(this.db, idsToRemove);
+			}
 			deleteSymbolsByKB(this.db, kb.id);
 			insertSymbols(this.db, kb.id, stagedSymbols);
 
@@ -1658,6 +1765,7 @@ export class KnowledgeEngine {
 			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			if (insertedChunkIds.length > 0) {
+				deleteFormulasForChunks(this.db, insertedChunkIds);
 				deleteChunksByIds(this.db, insertedChunkIds);
 				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 			}
@@ -1720,6 +1828,9 @@ export class KnowledgeEngine {
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const queryTokens = tokenizeForSimilarity(query);
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
+		// Layer 3 (spec §3.4.1): extracted before any other fusion work; zero formulas keeps the
+		// whole path — and the results — byte-identical to pre-L3.
+		const queryFormulas = extractQueryFormulas(query);
 
 		const warnings: string[] = [];
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
@@ -1829,6 +1940,33 @@ export class KnowledgeEngine {
 				result.score = ranking.adjusted_score;
 			}
 		}
+		// Layer 3 formula fusion (spec §3.4): post-merge, pre-threshold. Candidate collection is
+		// per kb (exact 1.0; fuzzy 0.8 * rank-normalized), the boost leg raises already-retrieved
+		// results by FORMULA_BOOST * formulaScore, and absent candidates are injected further below.
+		const formulaScores = new Map<string, number>();
+		const formulaInjectedChunkIds = new Set<string>();
+		if (queryFormulas.formulas.length > 0) {
+			this.ensureFormulaIndexesBuilt(kbs.map((kb) => kb.id));
+			for (const kb of kbs) {
+				for (const row of findExactFormulas(
+					db,
+					kb.id,
+					queryFormulas.formulas.map((f) => f.normalized),
+				)) {
+					formulaScores.set(row.chunk_id, Math.max(formulaScores.get(row.chunk_id) ?? 0, 1));
+				}
+				const ftsRows = searchFormulasFTS(db, kb.id, buildFormulaFtsQuery(queryFormulas.formulas), 50);
+				const topRank = ftsRows.length; // ranks are dense 1..N in best-first order
+				for (const row of ftsRows) {
+					const ftsScore = (FORMULA_FUZZY_TOP_SCORE * (topRank - row.rank + 1)) / topRank;
+					formulaScores.set(row.chunk_id, Math.max(formulaScores.get(row.chunk_id) ?? 0, ftsScore));
+				}
+			}
+			for (const result of unique) {
+				const formulaScore = formulaScores.get(result.chunkId);
+				if (formulaScore !== undefined) result.score += FORMULA_BOOST * formulaScore;
+			}
+		}
 		let scored = unique;
 		if (retrievalMode === "fast") {
 			scored = unique.filter((result) => {
@@ -1855,6 +1993,27 @@ export class KnowledgeEngine {
 				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) return false;
 				return true;
 			});
+		}
+
+		// Layer 3 injection leg (spec §3.4.5): formula candidates absent from the retrieved set
+		// become real results with match_reason "formula" — capped, sorted by formula score desc,
+		// respecting kb scope and metadata filters, and bypassing MIN_HYBRID_SCORE (ratified:
+		// formula evidence is not a lexical-prose score).
+		if (queryFormulas.formulas.length > 0 && formulaScores.size > 0) {
+			const retrievedIds = new Set(unique.map((result) => result.chunkId));
+			const injected = [...formulaScores.entries()]
+				.filter(([chunkId]) => !retrievedIds.has(chunkId))
+				.sort((a, b) => b[1] - a[1])
+				.slice(0, FORMULA_INJECTION_LIMIT);
+			for (const [chunkId, formulaScore] of injected) {
+				const chunk = getChunkById(db, chunkId);
+				if (!chunk || !kbById.has(chunk.kb_id)) continue;
+				if (normalizedFileType && chunk.file_type !== normalizedFileType) continue;
+				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) continue;
+				formulaInjectedChunkIds.add(chunkId);
+				filtered.push({ chunkId, score: formulaScore });
+			}
+			if (formulaInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
 		}
 
 		if (mode === "deep" && filtered.length > 0) {
@@ -1910,7 +2069,7 @@ export class KnowledgeEngine {
 						indexed_at: r.chunk.indexed_at,
 						source_mtime: sourceMtime,
 						stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
-						match_reason: matchReasonFor(mode),
+						match_reason: formulaInjectedChunkIds.has(r.chunk.id) ? "formula" : matchReasonFor(mode),
 						source_chunk_ids: r.sourceChunkIds,
 					},
 				};
@@ -1992,7 +2151,7 @@ export class KnowledgeEngine {
 					indexed_at: r.chunk.indexed_at,
 					source_mtime: sourceMtime,
 					stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
-					match_reason: matchReasonFor(mode),
+					match_reason: formulaInjectedChunkIds.has(r.chunk.id) ? "formula" : matchReasonFor(mode),
 					source_chunk_ids: r.sourceChunkIds,
 				};
 			})(),
@@ -2335,7 +2494,8 @@ export class KnowledgeEngine {
 			throwIfAborted(signal);
 			assertEmbeddingBatchSize(vectors, batch.length, "import");
 			persistEmbeddingMetadata(this.db, kb.id, embeddingConfig, vectors);
-			insertChunks(this.db, kb.id, batch);
+			const insertedIds = insertChunks(this.db, kb.id, batch);
+			writeFormulaRowsForInsertedChunks(this.db, kb.id, insertedIds, batch);
 			insertSymbols(this.db, kb.id, symbols);
 			vectorWriter.append(vectors);
 			inserted += batch.length;
