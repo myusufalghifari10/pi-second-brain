@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -20,6 +20,7 @@ export interface KnowledgeBase {
 	embedding_model: string;
 	embedding_signature: string | null;
 	embedding_dimension: number | null;
+	formula_index_built: number;
 	status: "ready" | "indexing" | "error" | "stale";
 }
 
@@ -77,8 +78,46 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const ITERATION_BATCH_SIZE = 500;
+
+const FORMULAS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS formulas (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  raw TEXT NOT NULL,
+  normalized TEXT NOT NULL,
+  content_tokenized TEXT NOT NULL DEFAULT '',
+  token_count INTEGER NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_formulas_kb_chunk ON formulas(kb_id, chunk_id);
+CREATE INDEX IF NOT EXISTS idx_formulas_kb_norm ON formulas(kb_id, normalized);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS formulas_fts USING fts5(
+  content_tokenized,
+  content=formulas,
+  content_rowid=rowid
+);
+
+-- Triggers to keep FTS in sync with formulas table
+CREATE TRIGGER IF NOT EXISTS formulas_ai AFTER INSERT ON formulas BEGIN
+  INSERT INTO formulas_fts(rowid, content_tokenized) VALUES (new.rowid, new.content_tokenized);
+END;
+
+CREATE TRIGGER IF NOT EXISTS formulas_ad AFTER DELETE ON formulas BEGIN
+  INSERT INTO formulas_fts(formulas_fts, rowid, content_tokenized) VALUES('delete', old.rowid, old.content_tokenized);
+END;
+
+CREATE TRIGGER IF NOT EXISTS formulas_au AFTER UPDATE ON formulas BEGIN
+  INSERT INTO formulas_fts(formulas_fts, rowid, content_tokenized) VALUES('delete', old.rowid, old.content_tokenized);
+  INSERT INTO formulas_fts(rowid, content_tokenized) VALUES (new.rowid, new.content_tokenized);
+END;
+`;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -99,6 +138,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   embedding_model TEXT NOT NULL DEFAULT 'multilingual-e5-small',
   embedding_signature TEXT,
   embedding_dimension INTEGER,
+  formula_index_built INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'ready'
 );
 
@@ -181,6 +221,8 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
   INSERT INTO chunks_fts(chunks_fts, rowid, content_tokenized) VALUES('delete', old.rowid, old.content_tokenized);
   INSERT INTO chunks_fts(rowid, content_tokenized) VALUES (new.rowid, new.content_tokenized);
 END;
+
+${FORMULAS_SCHEMA_SQL}
 `;
 
 type DatabaseConstructor = typeof Database;
@@ -409,6 +451,14 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			}
 			continue;
 		}
+		if (v === 6) {
+			db.exec(FORMULAS_SCHEMA_SQL);
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "formula_index_built")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN formula_index_built INTEGER NOT NULL DEFAULT 0");
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -469,6 +519,7 @@ export function listKBs(db: Database.Database): KnowledgeBase[] {
 export function deleteKB(db: Database.Database, id: string): void {
 	db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(id);
+	db.prepare("DELETE FROM formulas WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
 }
@@ -780,6 +831,132 @@ export function getFileCount(db: Database.Database, kbId: string): number {
 		count: number;
 	};
 	return row.count;
+}
+
+// --- CRUD: Formulas ---
+// Formula rows arrive PRE-normalized (normalization lives in the indexer layer); storage never normalizes.
+
+function formulaRowId(kbId: string, chunkId: string, ordinal: number, normalized: string): string {
+	return createHash("sha256").update(`${kbId}\0${chunkId}\0${ordinal}\0${normalized}`).digest("hex");
+}
+
+export function replaceFormulasForChunk(
+	db: Database.Database,
+	kbId: string,
+	chunkId: string,
+	rows: Array<{ ordinal: number; raw: string; normalized: string; tokenCount: number }>,
+): void {
+	const replace = db.transaction(
+		(items: Array<{ ordinal: number; raw: string; normalized: string; tokenCount: number }>) => {
+			db.prepare("DELETE FROM formulas WHERE kb_id = ? AND chunk_id = ?").run(kbId, chunkId);
+			if (items.length === 0) return;
+			const stmt = db.prepare(
+				`INSERT INTO formulas (id, kb_id, chunk_id, ordinal, raw, normalized, content_tokenized, token_count, indexed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			);
+			const now = Date.now();
+			for (const row of items) {
+				stmt.run(
+					formulaRowId(kbId, chunkId, row.ordinal, row.normalized),
+					kbId,
+					chunkId,
+					row.ordinal,
+					row.raw,
+					row.normalized,
+					row.normalized,
+					row.tokenCount,
+					now,
+				);
+			}
+		},
+	);
+	replace(rows);
+}
+
+export function deleteFormulasForChunks(db: Database.Database, chunkIds: string[]): void {
+	if (chunkIds.length === 0) return;
+	const batchSize = 500;
+	const deleteBatch = db.transaction((batch: string[]) => {
+		const placeholders = batch.map(() => "?").join(",");
+		db.prepare(`DELETE FROM formulas WHERE chunk_id IN (${placeholders})`).run(...batch);
+	});
+	for (let offset = 0; offset < chunkIds.length; offset += batchSize) {
+		deleteBatch(chunkIds.slice(offset, offset + batchSize));
+	}
+}
+
+export function markFormulaIndexBuilt(db: Database.Database, kbId: string): void {
+	db.prepare("UPDATE knowledge_bases SET formula_index_built = 1 WHERE id = ?").run(kbId);
+}
+
+export function listChunksForFormulaBackfill(
+	db: Database.Database,
+): Array<{ id: string; kb_id: string; metadata_json: string }> {
+	return db.prepare("SELECT id, kb_id, metadata_json FROM chunks ORDER BY rowid").all() as Array<{
+		id: string;
+		kb_id: string;
+		metadata_json: string;
+	}>;
+}
+
+export function findExactFormulas(
+	db: Database.Database,
+	kbId: string,
+	normalizedList: string[],
+): Array<{ chunk_id: string; normalized: string }> {
+	if (normalizedList.length === 0) return [];
+	const results: Array<{ chunk_id: string; normalized: string }> = [];
+	const batchSize = 500;
+	for (let offset = 0; offset < normalizedList.length; offset += batchSize) {
+		const batch = normalizedList.slice(offset, offset + batchSize);
+		const placeholders = batch.map(() => "?").join(",");
+		const rows = db
+			.prepare(
+				`SELECT DISTINCT chunk_id, normalized FROM formulas
+				 WHERE kb_id = ? AND normalized IN (${placeholders})`,
+			)
+			.all(kbId, ...batch) as Array<{ chunk_id: string; normalized: string }>;
+		results.push(...rows);
+	}
+	return results;
+}
+
+// ftsQuery is built by the caller (quoted OR-joined terms, bm25.ts discipline), but never trusted:
+// only an already-quoted OR expression is executed as-is; anything else is reduced to a quoted phrase.
+const SAFE_FTS_QUERY_PATTERN = /^"[^"]*"(?: OR "[^"]*")*$/;
+
+function buildSafeFormulaFtsQuery(ftsQuery: string): string | undefined {
+	const trimmed = ftsQuery.trim();
+	if (trimmed.length === 0) return undefined;
+	if (SAFE_FTS_QUERY_PATTERN.test(trimmed)) return trimmed;
+	const literal = trimmed.replaceAll('"', " ").trim();
+	return literal.length > 0 ? `"${literal}"` : undefined;
+}
+
+export function searchFormulasFTS(
+	db: Database.Database,
+	kbId: string,
+	ftsQuery: string,
+	limit: number,
+): Array<{ chunk_id: string; normalized: string; rank: number }> {
+	const safeQuery = buildSafeFormulaFtsQuery(ftsQuery);
+	const safeLimit = Math.max(0, Math.floor(limit));
+	if (!safeQuery || safeLimit === 0) return [];
+	try {
+		const rows = db
+			.prepare(
+				`SELECT f.chunk_id as chunk_id, f.normalized as normalized
+				 FROM formulas_fts JOIN formulas f ON formulas_fts.rowid = f.rowid
+				 WHERE formulas_fts MATCH ? AND f.kb_id = ?
+				 ORDER BY bm25(formulas_fts) LIMIT ?`,
+			)
+			.all(safeQuery, kbId, safeLimit) as Array<{ chunk_id: string; normalized: string }>;
+		// rank is a 1-based position in best-first order.
+		return rows.map((row, index) => ({ ...row, rank: index + 1 }));
+	} catch {
+		// Same fail-open discipline as searchBM25: a degenerate (e.g. token-less) phrase yields no results.
+		return [];
+	}
 }
 
 // --- CRUD: Symbols ---
