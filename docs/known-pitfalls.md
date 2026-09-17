@@ -38,6 +38,8 @@ It is not a Qt semantic analyzer and does not infer runtime signal wiring or com
 
 pdf-parse v2.x 的 class-based API 過於複雜且 bundle 巨大，已棄用。
 
+後續加上 optional PDF sidecar（marker/docling，見下方「PDF sidecar（marker/docling）」）：sidecar 可用時優先用它產生數學感知 Markdown，未安裝或失敗時仍走上述 unpdf 路徑。
+
 ## PDF/DOCX e2e fixture gate
 
 `npm run test:e2e` 在沒有 `PI_KNOWLEDGE_E2E_PDF` / `PI_KNOWLEDGE_E2E_DOCX` 時會 skip 真實文件抽取測試。這是為了避免把私有 PDF/DOCX fixtures 寫進 repo，但也代表 plain e2e 只能算 smoke pass。
@@ -49,6 +51,16 @@ PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx 
 ```
 
 不要把 fixture 檔案、抽取文字、snapshot 或本機絕對路徑 commit 進 repo。回報只寫 pass/fail、是否 skipped、chunk count 等非敏感摘要。
+
+## PDF sidecar（marker/docling）
+
+- **未安裝 sidecar = 靜默退回 unpdf（by design，不是 bug）**。`PI_KNOWLEDGE_PDF_ENGINE=auto` 找不到 marker/docling 時會靜默走 unpdf，科學 PDF 的公式仍然是 glyph soup。懷疑 sidecar 沒生效時，先確認已 `pip install marker-pdf` 或 `pip install docling` 且 binary 在 PATH，再看 scan skipped stats 是否出現 `pdf_sidecar_failed`——只有「偵測到 sidecar 但轉換失敗/timeout」才會記這個 reason，單純未安裝不會記。
+- **第一次跑 marker 會下載 GB 級 model weights，非常慢**。預設 120 秒 timeout 可能不夠，轉換會被 kill 後退回 unpdf。解法：調高 `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS`，或先手動對一個 PDF 跑一次 `marker_single` pre-warm，再開始 indexing。
+- **轉換期間 VRAM/CPU 用量高**。marker/docling 是 GPU/RAM 重的子程序；sidecar 轉換有 mutex 序列化，不會並行爆炸，但大型 PDF 轉換時與本機 LLM/embedding server 併跑仍要留意資源競爭。
+- **轉換後的 PDF chunks 內容是 Markdown，但 `file_type` 仍是 `"pdf"`**。這是刻意的 filter 相容設計：`file_type: "pdf"` filter 同時涵蓋 sidecar 與 fallback 兩種 PDF；轉換來源記在 chunk `metadata_json` 的 `converter` 欄位，context prefix 會多一行 `Converter: <name>`。
+- **轉換輸出的 Markdown 圖片連結指向已刪除的暫存目錄，是死的（inert by design）**。Layer 2 不抽取也不儲存圖片；dead links 只是文字，不影響 chunking、FTS 或搜尋，不要為此「修復」。
+- **轉換 timeout 只送 SIGTERM，沒有 SIGKILL 升級**。忽略 SIGTERM 的 sidecar process 可能殘留；無害（fail-open、tmpdir 清理不會 throw），但若回報 real-marker hang，先檢查殘留程序。
+- **`maxBuffer` 8 MB 涵蓋 stdout+stderr 合計**。在非常大的 PDF 上使用嘰嘰喳喳的 converter（例如 verbose docling）可能溢流 → `output_overflow` → 靜默退回 unpdf。這是設計行為，不是失敗。
 
 ## Pi modelRegistry 不提供 API key
 

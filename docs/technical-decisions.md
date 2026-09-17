@@ -374,3 +374,27 @@
 **重建索引邊界**:
 - 新 metadata keys（`formulas`/`labels`/`tags`/`aliases`/`title`/`links`）與 Markdown/LaTeX chunk 邊界改變會變更 chunk hash：升級後對受影響 KB 跑一次 `knowledge_update`，只會重嵌 md/tex 檔案；非數學檔案 hash 不變、vector 直接沿用。
 - 純 code KB 的 FTS 文字若含 `^`（如 `x^2` in code fences）會多出 `pow2` token：只在 `content_tokenized`，不改變返回內容，查詢端對稱，效果是額外可匹配性，由 BM25 IDF 排序消化。
+
+---
+
+## ADR-021: PDF 抽取走 optional external sidecar（marker 先、docling 備援、unpdf fail-open）
+
+**狀態**: 已決定
+
+**背景**: unpdf 只取 PDF raw text layer，科學文件的公式變 glyph soup、章節結構消失；math-aware chunking（Layer 1）需要 `$$…$$` LaTeX 輸入才能發揮作用。同時 `knowledge_update` 每輪都重新抽取所有掃描檔案，沒有 cache 就會對每個未變更的 PDF 重跑昂貴轉換。
+
+**決策**:
+- PDF 抽取改走 optional external converter sidecar，輸出帶 `$$…$$` LaTeX math 的 Markdown，直接進入既有 math-aware chunking pipeline。Sidecar 是使用者自行 pip 安裝的外部 binary，本套件不 bundle、不隨附散布，也不新增任何 npm dependency。
+- marker 為主、docling 為備援，兩者共用同一個 adapter contract；`PI_KNOWLEDGE_PDF_ENGINE=auto` 依 marker → docling → none 順序探測（`--help` probe，結果在 process 內快取）。
+- 全路徑 fail-open：未安裝、偵測失敗、轉換失敗、timeout（預設 120 s，`PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS` 可調）一律退回既有 unpdf 路徑；偵測到 sidecar 後的轉換失敗記錄為 `pdf_sidecar_failed` skipped 統計。`engine=off` 時行為與 unpdf-only 完全一致。
+- 轉換結果以 content hash cache：key = `sha256(sha256(pdf file bytes) + 解析後的 converter（`auto` 時為實際選中的引擎，而非設定值）+ adapterVersion)`，存於 `<knowledge-dir>/pdf-cache/`；unchanged PDF 永不重跑轉換；corrupt cache 一律視為 miss，不視為錯誤。
+- 子程序以 `execFile(file, args)` argv 陣列執行、絕不經過 shell；PDF path 作為單一 argv element 傳入。`PI_KNOWLEDGE_PDF_SIDECAR_CMD` argv template escape hatch 同樣走 no-shell 執行，搭配 `maxBuffer` 上限與 timeout kill。
+- 轉換後的 chunks 維持 `file_type: "pdf"`（既有 filter 相容），`metadata_json` 記錄 `converter`，context prefix 加上 `Converter:` 行。
+- marker model weights 授權為 OpenRAIL-M：本套件永不 bundle、下載或再散布 weights；由使用者依 marker 自身條款安裝。
+
+**理由**:
+- Sidecar 選型依據 ICPR benchmark 對科學 PDF parser 的結論：沒有任何 parser 是完美的，marker 與 docling 整體領先。marker 對科學 PDF（含 LaTeX 公式輸出）品質最好，故 marker-first；docling 提供安裝/維運上的替代，不追求功能對等。
+- Fail-open 讓 sidecar 是純增益：未安裝時與今天的 unpdf 行為一致、零 startup cost（lazy 動態載入），既有 KB 與測試不受影響。
+- Content-hash cache 是 mandatory 而非 optional：`knowledge_update` 每輪重新抽取，沒有 cache 會在每次 update 對每個 PDF 重跑 GPU/RAM 重的 marker；cache 放在 knowledge dir 下，自動繼承 `PI_KNOWLEDGE_DIR` 覆寫。
+- no-shell spawn 從結構上消除 crafted path injection 風險；`maxBuffer`/timeout 讓失控的 sidecar 輸出或卡死的轉換變成一次可 fallback 的失敗，而不是卡住整個索引。
+- `file_type: "pdf"` + `converter` metadata + `Converter:` prefix 讓 filter 使用者與 provenance 檢查都不會被靜默換掉的抽取來源誤導。

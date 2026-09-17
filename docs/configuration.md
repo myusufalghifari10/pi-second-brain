@@ -90,6 +90,24 @@ Search diagnostics include result provenance and applied search tuning in both t
 
 `knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find AST-backed methods/functions/classes/interfaces/types/variables for supported code files, route-like handlers, Markdown headings, config keys, and environment variables. It is not a full LSP or code graph; it does not answer caller/callee or rename-safety questions. For empty important lookups, use `knowledge_search` mode `fast`/`adaptive` and check `knowledge_doctor` for stale or missing symbol metadata. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
 
+## PDF Sidecar (Optional)
+
+PDF extraction supports an optional external converter sidecar. When `marker` (`pip install marker-pdf`) or `docling` (`pip install docling`) is installed, scientific PDFs are converted to Markdown with `$$…$$` LaTeX math and then flow through the same math-aware Markdown chunking as other documents. The sidecar is auto-detected in `auto` mode and is strictly fail-open: when no converter is installed, detection fails, conversion fails, or the timeout expires, extraction falls back silently to the built-in unpdf text extraction. Conversion failures after a converter was detected are visible in scan skipped stats as `pdf_sidecar_failed`. Invalid `PI_KNOWLEDGE_PDF_ENGINE` values warn once and behave as `auto`.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PI_KNOWLEDGE_PDF_ENGINE` | `auto` | Select the PDF extraction engine. `auto` detects `marker`, then `docling`, then falls back to built-in unpdf extraction. `marker` and `docling` select one sidecar explicitly. `off` keeps unpdf-only behavior and bypasses the conversion cache. |
+| `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS` | `120000` | Per-PDF conversion budget in milliseconds. When the budget expires the sidecar child process is killed, the conversion counts as a failure, and extraction falls back to unpdf. |
+| `PI_KNOWLEDGE_PDF_SIDECAR_MARKER_CMD` | `marker_single` | Binary name or path used by the marker sidecar adapter. |
+| `PI_KNOWLEDGE_PDF_SIDECAR_DOCLING_CMD` | `docling` | Binary name or path used by the docling sidecar adapter. |
+| `PI_KNOWLEDGE_PDF_SIDECAR_CMD` | unset | Full argv template that overrides built-in sidecar command construction, for example `node /path/to/custom-sidecar.mjs {input} {output_dir}`. `{input}` and `{output_dir}` placeholders are substituted, the template is split on whitespace, and it is executed as an argv array, never through a shell. When set, availability detection probes the template's first token with `--help`. |
+
+Converted chunks keep `file_type: "pdf"` so existing `file_type` filters keep working, and record the converter in chunk metadata plus a `Converter: <name>` context-prefix line.
+
+## PDF Sidecar Cache
+
+Sidecar conversions are cached under `<knowledge-dir>/pdf-cache/` (the same knowledge directory that stores `knowledge.db`, honoring `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`). The cache is content-addressed: entries are keyed by the SHA-256 of the PDF file bytes plus the selected engine and the sidecar adapter version, and each distinct PDF contributes one small `.md` file (plus a small `.json` metadata file). Cached conversions are read before a converter is spawned, so `knowledge_update` never re-converts an unchanged PDF. Corrupt or incomplete cache entries are treated as cache misses, never errors. The cache is safe to delete at any time: `rm -rf <knowledge-dir>/pdf-cache` forces full re-conversion on the next add/update. Removing a knowledge base does not delete the cache, and unbounded growth is accepted and documented: one small Markdown file per distinct converted PDF.
+
 ## Test and Release Fixtures
 
 | Variable | Default | Purpose |
