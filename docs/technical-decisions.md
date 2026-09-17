@@ -351,77 +351,77 @@
 
 ---
 
-## ADR-020: 數學正規化放在 preTokenizeForFTS 最後一步（canonicalize-last）與 pow/sub 複合 token
+## ADR-020: Math canonicalization is the last step in `preTokenizeForFTS` (canonicalize-last) with pow/sub composite tokens
 
-**狀態**: 已決定
+**Status**: Decided
 
-**背景**: Layer 1 數學感知 chunking 需要跨表示法 lexical 命中：`x²` ⇔ `x^2`、`α` ⇔ `\alpha`、`≤` ⇔ `\leq`。FTS 內容只有 `content_tokenized` 一份，查詢端 `tokenizeForSearch` 也以 `preTokenizeForFTS` 為第一階段，因此這是唯一需要對稱 injection 的單點。
+**Background**: Layer 1 math-aware chunking needs cross-notation lexical hits: `x²` ⇔ `x^2`, `α` ⇔ `\alpha`, `≤` ⇔ `\leq`. FTS content is a single `content_tokenized` column and the query-side `tokenizeForSearch` also uses `preTokenizeForFTS` as its first stage, so this is the single point requiring symmetric injection.
 
-**決策**:
-- `canonicalizeMathText()`（unicode map + caret 規則 + sup/sub fold）套在 `preTokenizeForFTS` 既有 chain **之後**（canonicalize-last），chain 本身一行不改。
-- 上標/下標 unicode 直接 fold 成 `pow2`、`sub1` 等 plain alphanumeric 複合 token；`+`/`-`/`=` 形式用字尾（`powplus`、`powminus`、`poweq`），不用 `pow+` 這類含標點形式。
-- ASCII `_` 一律不轉換（只有 `^` 有 marker 規則）；ASCII `a_1` 與 unicode `a₁` 仍不對稱，屬已知且接受的限制。
-- 單字母變數（`x`、`y`）在 index 與 query 端都會被既有 `length > 1` filter 丟棄；跨表示法匹配改由 `pow2`/`sub…` 複合 token 承擔。
+**Decision**:
+- `canonicalizeMathText()` (unicode map + caret rule + sup/sub folds) is applied AFTER the existing `preTokenizeForFTS` chain (canonicalize-last); the chain itself is untouched line-for-line.
+- Superscript/subscript unicode folds into plain alphanumeric composite tokens such as `pow2` and `sub1`; the `+`/`-`/`=` forms use letter suffixes (`powplus`, `powminus`, `poweq`) rather than punctuation-bearing forms like `pow+`.
+- ASCII `_` is never transformed (only `^` has a marker rule); ASCII `a_1` and unicode `a₁` remain asymmetric — a known and accepted limitation.
+- Single-letter variables (`x`, `y`) are dropped on both index and query sides by the existing `length > 1` filter; cross-notation matching is carried by the `pow2`/`sub…` composite tokens.
 
-**理由**:
-- canonicalize-last 是 load-bearing：若先 canonicalize，`x²` → `x pow2` 會被 chain 的 letter-digit split 撕成 `pow 2`，`2` 再被 length filter 丟掉，FTS term 只剩 `pow`，整個跨表示法機制靜默失效。
-- 複合 token 保證 FTS5 unicode61 與查詢端 punctuation strip 都不會切碎 `pow2`/`sub1`，BM25 term 精確對齊。
-- unicode map 對非數學文字必須零影響：identity fast-path（無數學字元且無 `^` 回傳原字串參考）保證既有測試與非數學 KB 的 chunk hash 不變，升級後無需重嵌。
-- `_` 不轉換是權衡：`snake_case` 無所不在，`_x` → `subx` 規則會破壞既有行為；上標（`x²` vs `x^2`）才是現實中主要的對稱需求，已取得完整對稱。
-- caret 規則會吸收空白分隔的運算元：`flags ^ mask` → `powmask`，standalone token `mask` 自 `content_tokenized` 消失（窄幅的 lexical-recall 變化；查詢端僅在查詢本身帶同樣 caret 表示式時才對稱命中），與已記載的 `x^2`→`pow2` 增益並存。
-- canonical form 只存在於 `content_tokenized` 與查詢詞；chunk `content` 保持原文（唯一例外：frontmatter 區塊移除、值保留在 metadata），embedding 品質不受影響。
+**Rationale**:
+- canonicalize-last is load-bearing: if canonicalization ran first, `x²` → `x pow2` would be torn apart by the chain's letter-digit split into `pow 2`, `2` would be dropped by the length filter, the FTS term would be just `pow`, and the whole cross-notation mechanism would silently die.
+- Composite tokens guarantee FTS5 unicode61 and query-side punctuation stripping never split `pow2`/`sub1`, keeping BM25 terms exactly aligned.
+- The unicode map must have zero impact on non-math text: the identity fast-path (no math characters and no `^` returns the original string reference) keeps existing tests and non-math KB chunk hashes unchanged — no re-embedding after upgrade.
+- `_` is not transformed as a tradeoff: `snake_case` is everywhere and a `_x` → `subx` rule would break existing behavior; superscripts (`x²` vs `x^2`) are the dominant real-world symmetry need and are fully symmetric.
+- The caret rule absorbs whitespace-separated operands: `flags ^ mask` → `powmask`, so the standalone token `mask` disappears from `content_tokenized` (a narrow lexical-recall change; the query side only hits symmetrically when the query itself carries the same caret expression) — coexisting with the documented `x^2`→`pow2` gain.
+- The canonical form exists only in `content_tokenized` and query terms; chunk `content` keeps the original text (the only exceptions: frontmatter block removal with values preserved in metadata), so embedding quality is unaffected.
 
-**重建索引邊界**:
-- 新 metadata keys（`formulas`/`labels`/`tags`/`aliases`/`title`/`links`）與 Markdown/LaTeX chunk 邊界改變會變更 chunk hash：升級後對受影響 KB 跑一次 `knowledge_update`，只會重嵌 md/tex 檔案；非數學檔案 hash 不變、vector 直接沿用。
-- 純 code KB 的 FTS 文字若含 `^`（如 `x^2` in code fences）會多出 `pow2` token：只在 `content_tokenized`，不改變返回內容，查詢端對稱，效果是額外可匹配性，由 BM25 IDF 排序消化。
-
----
-
-## ADR-021: PDF 抽取走 optional external sidecar（marker 先、docling 備援、unpdf fail-open）
-
-**狀態**: 已決定
-
-**背景**: unpdf 只取 PDF raw text layer，科學文件的公式變 glyph soup、章節結構消失；math-aware chunking（Layer 1）需要 `$$…$$` LaTeX 輸入才能發揮作用。同時 `knowledge_update` 每輪都重新抽取所有掃描檔案，沒有 cache 就會對每個未變更的 PDF 重跑昂貴轉換。
-
-**決策**:
-- PDF 抽取改走 optional external converter sidecar，輸出帶 `$$…$$` LaTeX math 的 Markdown，直接進入既有 math-aware chunking pipeline。Sidecar 是使用者自行 pip 安裝的外部 binary，本套件不 bundle、不隨附散布，也不新增任何 npm dependency。
-- marker 為主、docling 為備援，兩者共用同一個 adapter contract；`PI_KNOWLEDGE_PDF_ENGINE=auto` 依 marker → docling → none 順序探測（`--help` probe，結果在 process 內快取）。
-- 全路徑 fail-open：未安裝、偵測失敗、轉換失敗、timeout（預設 120 s，`PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS` 可調）一律退回既有 unpdf 路徑；偵測到 sidecar 後的轉換失敗記錄為 `pdf_sidecar_failed` skipped 統計。`engine=off` 時行為與 unpdf-only 完全一致。
-- 轉換結果以 content hash cache：key = `sha256(sha256(pdf file bytes) + 解析後的 converter（`auto` 時為實際選中的引擎，而非設定值）+ adapterVersion)`，存於 `<knowledge-dir>/pdf-cache/`；unchanged PDF 永不重跑轉換；corrupt cache 一律視為 miss，不視為錯誤。
-- 子程序以 `execFile(file, args)` argv 陣列執行、絕不經過 shell；PDF path 作為單一 argv element 傳入。`PI_KNOWLEDGE_PDF_SIDECAR_CMD` argv template escape hatch 同樣走 no-shell 執行，搭配 `maxBuffer` 上限與 timeout kill。
-- 轉換後的 chunks 維持 `file_type: "pdf"`（既有 filter 相容），`metadata_json` 記錄 `converter`，context prefix 加上 `Converter:` 行。
-- marker model weights 授權為 OpenRAIL-M：本套件永不 bundle、下載或再散布 weights；由使用者依 marker 自身條款安裝。
-
-**理由**:
-- Sidecar 選型依據 ICPR benchmark 對科學 PDF parser 的結論：沒有任何 parser 是完美的，marker 與 docling 整體領先。marker 對科學 PDF（含 LaTeX 公式輸出）品質最好，故 marker-first；docling 提供安裝/維運上的替代，不追求功能對等。
-- Fail-open 讓 sidecar 是純增益：未安裝時與今天的 unpdf 行為一致、零 startup cost（lazy 動態載入），既有 KB 與測試不受影響。
-- Content-hash cache 是 mandatory 而非 optional：`knowledge_update` 每輪重新抽取，沒有 cache 會在每次 update 對每個 PDF 重跑 GPU/RAM 重的 marker；cache 放在 knowledge dir 下，自動繼承 `PI_KNOWLEDGE_DIR` 覆寫。
-- no-shell spawn 從結構上消除 crafted path injection 風險；`maxBuffer`/timeout 讓失控的 sidecar 輸出或卡死的轉換變成一次可 fallback 的失敗，而不是卡住整個索引。
-- `file_type: "pdf"` + `converter` metadata + `Converter:` prefix 讓 filter 使用者與 provenance 檢查都不會被靜默換掉的抽取來源誤導。
+**Rebuild boundary**:
+- New metadata keys (`formulas`/`labels`/`tags`/`aliases`/`title`/`links`) and changed Markdown/LaTeX chunk boundaries change chunk hashes: after upgrading, run `knowledge_update` once on affected KBs — only md/tex files get re-embedded; non-math files keep identical hashes and reuse their vectors.
+- Pure-code KBs whose FTS text contains `^` (e.g. `x^2` in code fences) gain an extra `pow2` token: only in `content_tokenized`, returned content unchanged, query side symmetric — the effect is extra matchability, absorbed by BM25 IDF ranking.
 
 ---
 
-## ADR-022: 公式檢索採用 structural-lexical 正規化索引（normalized token signature + FTS 融合，不用 AST/符號等價）
+## ADR-021: PDF extraction goes through an optional external sidecar (marker first, docling fallback, unpdf fail-open)
 
-**狀態**: 已決定
+**Status**: Decided
 
-**背景**: Layer 1 讓公式在 chunking 中存活並 canonicalize 數學 unicode，但檢索仍是「對 chunk 文字的 lexical 比對」：查詢 `$E=mc^{2}$` 與散文 token 競爭，`\dfrac`/`\frac`、`\le`/`\leq`、`{x}`/`x`、`\left(..\right)`、`\mathrm`、空白差異等外觀變體會破壞匹配。公式等價的完整解（AST/skeleton 結構比對、MathML、SymPy 式符號等價、MathIR、per-formula embeddings）每一條都代表重量級依賴、新向量空間或脆弱的 parser。
+**Background**: unpdf only extracts the raw PDF text layer — formulas in scientific documents turn into glyph soup and section structure disappears; math-aware chunking (Layer 1) needs `$$…$$` LaTeX input to shine. At the same time `knowledge_update` re-extracts every scanned file on each run, so without a cache every unchanged PDF would re-run an expensive conversion.
 
-**決策**:
-- 公式檢索走 structural-lexical 路線：index 時從 chunk `metadata.formulas` 抽出公式，`normalizeFormula` 正規化成 canonical token signature（去 layout 指令、拆 style wrapper、重用 L1 unicode maps、TeX alias 表、移除 braces、保留大小寫），存入專屬 `formulas` 表 + external-content `formulas_fts`（SCHEMA_VERSION 5→6，migration 為 pure SQL）。
-- 查詢端 `extractQueryFormulas` 用 L1 scanner 抽出查詢中的公式（含 bare-TeX 偵測，上限 5 個），對每個 KB 做 exact（正規化後完全相等，score 1.0）與 FTS（quoted-OR-terms，rank-normalized）雙腿檢索，per-chunk 取 max 分數。
-- 融合規則：已檢索到的 chunk 加上 `FORMULA_BOOST = 0.35 * formulaScore`；不在結果中的候選 chunk 以 `match_reason: "formula"` 注入，上限 5 筆，注入結果刻意 bypass `MIN_HYBRID_SCORE`——公式 exact/FTS 命中是公式證據，不是 lexical-prose 分數，不該被為散文查詢設計的 confidence gate 擋掉。
-- 明確不採用：AST/skeleton 結構比對、MathML、SymPy 式符號等價、per-formula embeddings/vector index（deferred）。chunk-level vector 已承載公式文字，公式專屬 embedding 是重複投資。
-- 非數學查詢完全休眠：查詢不含公式時整條融合路徑零執行，結果與 L3 之前 byte-identical。無新 env vars、無新 npm dependencies。
-- 既有 KB 用 one-time backfill 補齊：升級後第一次帶公式的查詢或第一次 add 時掃描 chunk `metadata_json`、寫入公式 rows，並以 `knowledge_bases.formula_index_built` flag 保證每 KB 只跑一次；整段永不 throw，失敗一律 fail-open（公式功能靜默休眠，其他行為不變）。
+**Decision**:
+- PDF extraction goes through an optional external converter sidecar that emits Markdown with `$$…$$` LaTeX math, flowing directly into the existing math-aware chunking pipeline. The sidecar is a user-installed external binary (pip); this package never bundles or ships it and adds no npm dependency.
+- marker is primary, docling the fallback; both share one adapter contract. `PI_KNOWLEDGE_PDF_ENGINE=auto` probes marker → docling → none (`--help` probe, cached per process).
+- Fail-open on every path: not installed, detection failure, conversion failure, or timeout (default 120 s, adjustable via `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS`) all fall back to the existing unpdf path; conversion failures after a converter was detected are recorded as `pdf_sidecar_failed` skipped stats. With `engine=off`, behavior is identical to unpdf-only.
+- Conversion results are cached by content hash: key = `sha256(sha256(pdf file bytes) + resolved converter (the engine actually selected in `auto` mode, not the configured value) + adapterVersion)`, stored under `<knowledge-dir>/pdf-cache/`; unchanged PDFs never re-convert; a corrupt cache entry is always a miss, never an error.
+- Child processes run via `execFile(file, args)` argv arrays, never a shell; the PDF path enters as a single argv element. The `PI_KNOWLEDGE_PDF_SIDECAR_CMD` argv-template escape hatch also executes no-shell, with a `maxBuffer` cap and timeout kill.
+- Converted chunks keep `file_type: "pdf"` (existing filter compatibility), record `converter` in `metadata_json`, and gain a `Converter:` context-prefix line.
+- marker model weights are licensed OpenRAIL-M: this package never bundles, downloads, or redistributes weights; users install under marker's own terms.
 
-**理由**:
-- ARQMath（Mansouri et al.）的教訓：symbolic n-gram / normalized-token baseline 在公式檢索上與完整 MathIR 系統競爭力相當，複雜度只有零頭；完整 SLT/SymPy parsing 脆弱且依賴重。brace-insensitive token 化（`{x}`≡`x`、`\frac{a}{b}`→`frac a b`）不需 parser 就涵蓋主要外觀變體。
-- 零新依賴：正規化是純字串運算 + 既有 L1 unicode maps；Node 生態沒有輕量的符號等價引擎，formula embeddings 則要新模型與新向量空間，違反本功能的 no-new-deps 前提。
-- deterministic：同輸入必得同 signature，FTS term 沿用 `prepareFtsTerms` 的 quoted-term 紀律，沒有模型推論就沒有 nondeterminism，測試可用 golden 值斷言。
-- 注入結果 bypass `MIN_HYBRID_SCORE` 是 ratify 過的取捨：`$E=mc^{2}$` 這類只有公式差異的查詢若被 confidence gate 擋掉會靜默失敗；注入上限 5 筆與 0.35 boost 上限防止公式腿淹沒正常檢索。
-- 大型 KB 的 backfill 成本以「每 KB 一次 + flag 持久化 + fail-open」控制在可接受範圍，符合 ADR-015 的長任務穩定性姿態。
+**Rationale**:
+- Sidecar choice follows the ICPR benchmark on scientific PDF parsers: no parser is perfect; marker and docling lead overall. marker has the best quality on scientific PDFs (including LaTeX formula output), hence marker-first; docling provides an installation/ops alternative, not feature parity.
+- Fail-open makes the sidecar pure gain: when not installed, behavior matches today's unpdf path with zero startup cost (lazy dynamic import); existing KBs and tests are unaffected.
+- The content-hash cache is mandatory, not optional: `knowledge_update` re-extracts every run, and without a cache every update would re-run the GPU/RAM-heavy marker for every PDF. The cache lives under the knowledge dir and inherits `PI_KNOWLEDGE_DIR` overrides automatically.
+- No-shell spawn structurally eliminates crafted-path injection; `maxBuffer`/timeout turn a runaway sidecar output or a hung conversion into a single fallible event instead of stalling the whole index.
+- `file_type: "pdf"` + `converter` metadata + the `Converter:` prefix keep filter users and provenance checks from being misled by a silently swapped extraction source.
 
-**重建索引邊界**:
-- SCHEMA_VERSION 5→6 migration 在既有 KB 開啟時自動執行，公式 rows 由 first-search/add 的 backfill 補齊，不需要使用者手動 `knowledge_update`；chunk identity 與 vectors 完全不受影響。
-- 公式正規化規則若未來改動（TeX alias 表新增條目必須配對 test vector），既有 formula rows 會與查詢端 signature 不對稱，需清除重建 `formulas` 表；這是未來變更的義務，不是本版行為。
+---
+
+## ADR-022: Formula retrieval uses a structural-lexical normalized index (normalized token signature + FTS fusion, not AST/symbolic equivalence)
+
+**Status**: Decided
+
+**Background**: Layer 1 made formulas survive chunking and canonicalize math unicode, but retrieval is still lexical matching over chunk text: a query `$E=mc^{2}$` competes with prose tokens, and cosmetic variants (`\dfrac`/`\frac`, `\le`/`\leq`, `{x}`/`x`, `\left(..\right)`, `\mathrm`, spacing) break matching. The complete solutions to formula equivalence (AST/skeleton structure matching, MathML, SymPy-style symbolic equivalence, MathIR, per-formula embeddings) each imply heavyweight dependencies, new vector spaces, or brittle parsers.
+
+**Decision**:
+- Formula retrieval takes the structural-lexical route: at index time formulas are extracted from chunk `metadata.formulas` and `normalizeFormula` normalizes each into a canonical token signature (layout commands removed, style wrappers unwrapped, L1 unicode maps reused, TeX alias table, braces removed, case preserved), stored in a dedicated `formulas` table + external-content `formulas_fts` (SCHEMA_VERSION 5→6, pure-SQL migration).
+- The query side (`extractQueryFormulas`) uses the L1 scanner to pull formulas from the query (including bare-TeX detection, capped at 5) and runs two retrieval legs per KB: exact (full normalized equality, score 1.0) and FTS (quoted-OR terms, rank-normalized); per-chunk score = max of the legs.
+- Fusion: already-retrieved chunks gain `FORMULA_BOOST = 0.35 * formulaScore`; candidates absent from results are injected with `match_reason: "formula"`, capped at 5. Injection deliberately bypasses `MIN_HYBRID_SCORE` — an exact/FTS formula hit is formula evidence, not a lexical-prose score, and must not be blocked by a confidence gate designed for prose queries.
+- Explicitly rejected: AST/skeleton structure matching, MathML, SymPy-style symbolic equivalence, per-formula embeddings/vector index (deferred). The chunk-level vector already carries formula text; a dedicated formula embedding is duplicate investment.
+- Fully dormant for non-math queries: with no formula in the query the entire fusion path executes zero statements and results are byte-identical to pre-L3. No new env vars, no new npm dependencies.
+- Existing KBs are covered by a one-time backfill: on the first formula-bearing query (or first add) after upgrade, chunk `metadata_json` is scanned, formula rows written, and the `knowledge_bases.formula_index_built` flag guarantees once-per-KB; the whole body never throws — failures fail open (formula features silently dormant, everything else unchanged).
+
+**Rationale**:
+- The ARQMath (Mansouri et al.) lesson: symbolic n-gram / normalized-token baselines are competitive with full MathIR systems at a fraction of the complexity; full SLT/SymPy parsing is brittle and dependency-heavy. Brace-insensitive tokenization (`{x}`≡`x`, `\frac{a}{b}`→`frac a b`) covers the dominant cosmetic variants without a parser.
+- Zero new dependencies: normalization is pure string operations plus the existing L1 unicode maps; the Node ecosystem has no lightweight symbolic-equivalence engine, and formula embeddings would need a new model and vector space, violating this feature's no-new-deps premise.
+- Deterministic: same input always yields the same signature; FTS terms follow the `prepareFtsTerms` quoted-term discipline; no model inference means no nondeterminism and tests can assert golden values.
+- Injected results bypassing `MIN_HYBRID_SCORE` is a ratified tradeoff: a formula-only-different query like `$E=mc^{2}$` would fail silently behind the confidence gate; the 5-result injection cap and the 0.35 boost cap keep the formula leg from drowning normal retrieval.
+- Large-KB backfill cost is held acceptable by "once per KB + persisted flag + fail-open", consistent with ADR-015's long-task stability posture.
+
+**Rebuild boundary**:
+- The SCHEMA_VERSION 5→6 migration runs automatically when an existing KB opens; formula rows are backfilled by the first search/add — no manual `knowledge_update` needed; chunk identity and vectors are completely unaffected.
+- If normalization rules ever change (new TeX alias table entries require a paired test vector), existing formula rows become asymmetric with query-side signatures and the `formulas` table must be dropped and rebuilt; that is an obligation on future changes, not behavior of this version.
