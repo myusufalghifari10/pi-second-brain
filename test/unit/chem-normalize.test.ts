@@ -172,6 +172,14 @@ describe("extractQueryFormulas — F2 chem query routing", () => {
 		expect(result.cleanedQuery).toBe("what is H2SO4 used for");
 	});
 
+	it("ReDoS guard: a 64-digit run input is rejected fast instead of backtracking exponentially", () => {
+		const start = Date.now();
+		const result = isMolecularFormula(`H${"2".repeat(64)}z`);
+		expect(result).toBe(false);
+		// Loose bound: the fix makes this single-digit-ms; the loose assertion avoids CI flakiness.
+		expect(Date.now() - start).toBeLessThan(1000);
+	});
+
 	it("single-element plain text stays prose (Co queries are not chem formulas)", () => {
 		const result = extractQueryFormulas("Co");
 		expect(result.formulas).toHaveLength(0);

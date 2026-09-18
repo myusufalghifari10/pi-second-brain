@@ -5,7 +5,7 @@
 
 // Frozen curated set, expressed in TOKEN SPACE: the exact strings that occur in the token
 // stream produced by preTokenizeForFTS. camelCase/digit-letter splitting and math-glyph
-// folding decompose several surface forms, so spec §3.2's 34 surface entries consolidate
+// folding decompose several surface forms, so spec §3.2's 31 surface entries consolidate
 // to 34 token entries (derived 1:1 from the surface list; the lone addition is "h", hour,
 // required by the kW·h / km·h vectors):
 //

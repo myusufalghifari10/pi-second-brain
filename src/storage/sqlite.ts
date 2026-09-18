@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS label_edges (
 
 CREATE INDEX IF NOT EXISTS idx_label_edges_kb_src ON label_edges(kb_id, src_chunk_id);
 CREATE INDEX IF NOT EXISTS idx_label_edges_kb_scope ON label_edges(kb_id, scope_key);
+CREATE INDEX IF NOT EXISTS idx_label_edges_src ON label_edges(src_chunk_id);
 `;
 
 const SCHEMA_SQL = `

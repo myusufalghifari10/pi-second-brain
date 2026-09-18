@@ -169,9 +169,17 @@ interface CacheMeta {
 	sourceBytes: number;
 }
 
-function cacheKeyFor(pdfBytes: Buffer, engine: string): string {
+function cacheKeyFor(pdfBytes: Buffer, engine: string, ocrIdentity: string): string {
 	const contentHash = createHash("sha256").update(pdfBytes).digest("hex");
-	return createHash("sha256").update(`${contentHash}\0${engine}\0${ADAPTER_VERSION}`).digest("hex");
+	// The OCR setting is part of the conversion identity: toggling PI_KNOWLEDGE_OCR_ENGINE or
+	// the command template must not serve cached markdown with stale caption paragraphs.
+	return createHash("sha256").update(`${contentHash}\0${engine}\0${ADAPTER_VERSION}\0${ocrIdentity}`).digest("hex");
+}
+
+function ocrCacheIdentity(): string {
+	const ocr = resolveOcrConfig();
+	if (ocr.engine === "off") return "ocr:off";
+	return `ocr:${ocr.engine}:${ocr.cmdTemplate ?? ocr.tesseractCmd}`;
 }
 
 function readCache(key: string): string | undefined {
@@ -249,7 +257,7 @@ async function runConversion(
 		);
 	}
 	const pdfBytes = readFileSync(filePath);
-	const key = cacheKeyFor(pdfBytes, converter);
+	const key = cacheKeyFor(pdfBytes, converter, ocrCacheIdentity());
 	const cached = readCache(key);
 	if (cached !== undefined) return { markdown: cached, converter };
 

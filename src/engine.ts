@@ -1051,11 +1051,14 @@ function edgesGroupedPerTrigger(
 	rows: ResolvedLabelEdgeRow[],
 	capPerTrigger: number,
 ): Map<string, ResolvedLabelEdgeRow[]> {
+	// Byte-stable codepoint ordering: localeCompare varies across hosts, which could
+	// change which edges survive the cap (S3 determinism requires host independence).
+	const byCodepoint = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
 	const sorted = [...rows].sort(
 		(a, b) =>
-			a.src_chunk_id.localeCompare(b.src_chunk_id) ||
-			a.target_label.localeCompare(b.target_label) ||
-			a.scope_key.localeCompare(b.scope_key),
+			byCodepoint(a.src_chunk_id, b.src_chunk_id) ||
+			byCodepoint(a.target_label, b.target_label) ||
+			byCodepoint(a.scope_key, b.scope_key),
 	);
 	const grouped = new Map<string, ResolvedLabelEdgeRow[]>();
 	for (const row of sorted) {
@@ -2252,6 +2255,9 @@ export class KnowledgeEngine {
 			let injectedCount = 0;
 			for (const chunkId of candidates) {
 				if (injectedCount >= DEPENDENCY_INJECTION_LIMIT) break;
+				// A chunk already injected by the formula leg must not be injected again here —
+				// duplicate rows with conflicting match_reason would otherwise reach the results.
+				if (formulaInjectedChunkIds.has(chunkId)) continue;
 				const chunk = getChunkById(db, chunkId);
 				const kb = chunk ? kbById.get(chunk.kb_id) : undefined;
 				if (!chunk || !kb) continue;

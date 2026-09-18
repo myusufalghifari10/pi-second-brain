@@ -151,7 +151,7 @@ const GROUP_LEVEL_1 = `\\((?:${ELEMENT_UNIT})+\\)\\d*`;
 const GROUP_LEVEL_2 = `\\((?:${ELEMENT_UNIT}|${GROUP_LEVEL_1})+\\)\\d*`;
 const STATE_SUFFIX = `\\((?:s|l|g|aq)\\)`;
 const CHARGE = `\\^\\{?\\d*[+-]\\}?|[+-]\\d+|\\d+[+-]|[+-]`;
-const CORE_ATOM = `(?:_*${ELEMENT_UNIT}|_*${ELEMENT_UNIT_SUB}|_*${GROUP_LEVEL_1}|_*${GROUP_LEVEL_2}|_*${STATE_SUFFIX}|[·*]\\d*|\\d+)`;
+const CORE_ATOM = `(?:_*${ELEMENT_UNIT}|_*${ELEMENT_UNIT_SUB}|_*${GROUP_LEVEL_1}|_*${GROUP_LEVEL_2}|_*${STATE_SUFFIX}|[·*]\\d*|(?<![A-Za-z0-9)])\\d+)`;
 const SPECIES = `(?:${CORE_ATOM})+(?:${CHARGE})?`;
 const ARROW = `->|→|\\\\rightarrow|\\\\leftrightarrow`;
 export const MOLECULAR_RE = new RegExp(`^${SPECIES}(?:\\s*(?:${ARROW})\\s*${SPECIES})*$`);
@@ -204,7 +204,13 @@ function foldChemChars(text: string): string {
 // sub/superscript characters fold to ASCII first so H₂SO₄ detects exactly like H2SO4 (S1).
 export function isMolecularFormula(text: string): boolean {
 	const candidate = foldChemChars(text.trim());
-	if (candidate === "" || !MOLECULAR_RE.test(candidate)) return false;
+	if (candidate === "") return false;
+	// Defensive ReDoS guard: a 25+ digit run has no meaning in MOLECULAR_RE beyond
+	// extending an element's greedy \\d*, and the CORE_ATOM lookbehind removes the
+	// partition ambiguity between that \\d* and the bare \\d+ alternative that made
+	// such runs backtrack exponentially. Reject these inputs without running the RE.
+	if (/\\d{25}/.test(candidate)) return false;
+	if (!MOLECULAR_RE.test(candidate)) return false;
 	if (!/[A-Z]/.test(candidate)) return false;
 	const elementTokens = candidate.match(new RegExp(ELEMENT_SOURCE, "g"));
 	return (elementTokens?.length ?? 0) >= 2;

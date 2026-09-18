@@ -651,6 +651,39 @@ describe("engine label graph backfill and dependency leg (F7/F8)", () => {
 		expect(dormantResponse.results.every((result) => result.provenance?.depends_on === undefined)).toBe(true);
 	});
 
+	it("F8: a chunk injected by the formula leg is not re-injected as a dependency duplicate", async () => {
+		const { kbId } = await createSeededKb("F8FormulaDependencyOverlap", [
+			labeledChunk({
+				file_path: "docs/main.md",
+				// content_tokenized contains every pipeline token of the query below (for
+				// \ce{H2SO4} that is … ce … so), so strict-AND bm25 retrieves this chunk: it is
+				// the dependency TRIGGER (refs eq:aux).
+				content: "shared topic marker alpha flux law ce so",
+				content_tokenized: "shared topic marker alpha flux law ce so",
+				metadata_json: JSON.stringify({ labels: ["eq:main"], refs: ["eq:aux"] }),
+			}),
+			labeledChunk({
+				file_path: "docs/aux.md",
+				// Lexically unrelated to the query (fast mode strict-AND misses), but carries
+				// the queried formula, so the formula leg injects it outside the lexical top set.
+				content: "auxiliary estimate body",
+				content_tokenized: "auxiliary estimate body",
+				metadata_json: JSON.stringify({ labels: ["eq:aux"], formulas: ["\\\\ce{H2SO4}"] }),
+			}),
+		]);
+
+		const response = await engine.search("shared topic marker flux law \\ce{H2SO4}", {
+			mode: "fast",
+			limit: 5,
+			kb_id: kbId,
+		});
+
+		const auxRows = response.results.filter((result) => result.file_path === "docs/aux.md");
+		expect(auxRows).toHaveLength(1);
+		expect(auxRows[0]?.provenance?.match_reason).toBe("formula");
+		expect(response.results.filter((result) => result.file_path === "docs/main.md")).toHaveLength(1);
+	});
+
 	it("F8: unresolved edges are recorded with NULL targets, never guessed or injected", async () => {
 		const { kbId } = await createSeededKb("F8Unresolved", [
 			labeledChunk({
