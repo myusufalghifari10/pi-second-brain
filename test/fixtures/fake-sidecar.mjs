@@ -16,7 +16,11 @@
 //                         argv record is written into the output dir, which convertPdf
 //                         removes during cleanup — hence the mirror.
 //   FAKE_SIDECAR_SLEEP_MS sleep duration for mode=sleep (default 5000).
-import { readFileSync, writeFileSync } from "node:fs";
+//   FAKE_SIDECAR_IMAGES  path of an image file copied into the output dir as images/figure-1.png
+//                        and images/figure-2.png (image-persistence tests), or the literal
+//                        "missing" to emit the same image refs without copying any files.
+//                        Unset (default) emits no image block — existing behavior untouched.
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 const argv = process.argv.slice(2);
@@ -38,6 +42,34 @@ function readCounter() {
 
 function writeCounter(state) {
 	if (process.env.FAKE_SIDECAR_COUNTER) writeFileSync(process.env.FAKE_SIDECAR_COUNTER, JSON.stringify(state));
+}
+
+// Image block for the persistence tests: an image with alt text plus an adjacent caption line
+// (never OCR-eligible) and an alt-less, blank-line-isolated image (OCR-eligible). With
+// FAKE_SIDECAR_IMAGES="missing" the refs are emitted but no files are written, exercising the
+// drop-missing-ref path.
+function imageBlockLines() {
+	const source = process.env.FAKE_SIDECAR_IMAGES;
+	if (!source) return [];
+	if (source !== "missing") {
+		try {
+			mkdirSync(join(outputDir, "images"), { recursive: true });
+			const bytes = readFileSync(source);
+			writeFileSync(join(outputDir, "images", "figure-1.png"), bytes);
+			writeFileSync(join(outputDir, "images", "figure-2.png"), bytes);
+		} catch {
+			// copy failure degrades to refs-only; consumers must drop the missing files
+		}
+	}
+	return [
+		"## Figures",
+		"",
+		"![Linear actuator force diagram](images/figure-1.png)",
+		"The figure one caption describes the linear actuator force diagram.",
+		"",
+		"![](images/figure-2.png)",
+		"",
+	];
 }
 
 if (argv.includes("--help")) {
@@ -80,6 +112,7 @@ try {
 						"| --- | --- |",
 						"| Energy | E |",
 						"",
+						...imageBlockLines(),
 					].join("\n"),
 				);
 			}

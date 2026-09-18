@@ -81,5 +81,11 @@
 		"mode": "hybrid",
 		"kb": "llm-papers",
 		"expect": { "file_path": "foundations/2501.12948.pdf" }
+	},
+	{
+		"id": "fake-sidecar-image-emission",
+		"query": "fake sidecar emits linear actuator force diagram image markdown figure",
+		"mode": "hybrid",
+		"expect": { "file_path": "fake-sidecar.mjs" }
 	}
 ]
