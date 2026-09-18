@@ -425,3 +425,73 @@
 **Rebuild boundary**:
 - The SCHEMA_VERSION 5→6 migration runs automatically when an existing KB opens; formula rows are backfilled by the first search/add — no manual `knowledge_update` needed; chunk identity and vectors are completely unaffected.
 - If normalization rules ever change (new TeX alias table entries require a paired test vector), existing formula rows become asymmetric with query-side signatures and the `formulas` table must be dropped and rebuilt; that is an obligation on future changes, not behavior of this version.
+
+---
+
+## ADR-023: Chemistry normalization routes through a single entry point in `normalizeFormula` (lexical signatures, no RDKit)
+
+**Status**: Decided
+
+**Background**: Chemistry-heavy sources write the same species many ways: `\ce{H2SO4}` (mhchem), plain `H2SO4`, unicode `H₂SO₄`, with optional states, charges, hydrate dots, and reaction arrows. The Layer 3 generic formula normalizer is TeX-lexical: it treats `\ce` as a TeX command and never unifies unicode subscript characters with ASCII counts, so `H2SO4` and `\ce{H2SO4}` would not match. The complete chemistry equivalence solution (RDKit/SMILES structural matching) implies a heavy native dependency and a new equivalence model.
+
+**Decision**:
+- Single-entry routing: inside `normalizeFormula`, the trimmed raw input delegates to `chemNormalize()` when it contains `\ce{`, or when it contains no TeX commands and full-matches the anchored `MOLECULAR_RE`. Both index side (formula rows from chunk `metadata.formulas`) and query side (`extractQueryFormulas`) therefore share one deterministic path — no second chemistry code path exists to drift.
+- `MOLECULAR_RE` is an anchored full-match over all 118 element symbols (case-sensitive, longest-first), accepting digit counts, `_` subscript separators, parenthesized groups (nested ≤ 2), charges (`+`, `-`, `^{n±}`, `^n±`), hydrate dots (`·`, `*`), state suffixes `(s)|(l)|(g)|(aq)` (stripped), and arrows that split multi-species sequences while preserving species order. A molecule match requires ≥ 2 element tokens and at least one uppercase letter, which kills prose words ("No", "At", "In") unless they genuinely full-match a formula.
+- The `chemNormalize` pipeline is ordered and normative: strip the `\ce{}` wrapper and state suffixes; fold unicode sub/superscript characters to ASCII via a local char map (never the FTS-layer `sub2`-style fold tokens); unify arrows to `->` and charges to the trailing `^n±` form; map hydrate dots to a `.` token; emit per-species element-count tokens with paren groups flattened and multiplier-distributed (`Ca(OH)2` → `Ca O2 H2`, nested groups compose multiplicatively); join with single spaces, case preserved throughout (`Co` ≠ `CO`). It rejects (returns `undefined`, Layer 3 reject semantics) on zero species or input over `MAX_FORMULA_CHARS`, and tolerates mismatched parentheses without throwing.
+- Query side: text segments that full-match `MOLECULAR_RE` are treated as one chemistry formula, so the plain query `H2SO4` works; the bare-TeX rule already covers `\ce{…}` queries; cap and reject semantics are unchanged from Layer 3.
+- Lexical, not structural: the signature unifies spelling variants of the same composition; genuinely different compositions never match, and there is no RDKit, SMILES, or molecular-graph parsing. Prose-level molecular formula detection on the index side is intentionally out of scope (precision trap): only math-segment formulas and `\ce{}` inputs are indexed.
+- No new dependencies and no schema change: chemistry rows live in the existing `formulas` table + FTS index and reuse Layer 3 fusion (boost/inject with `match_reason: "formula"`).
+
+**Rationale**:
+- The single entry point makes index and query signatures symmetric by construction; a parallel chemistry path would eventually normalize one side differently and silently break exact matching.
+- Anchored full-match + ≥ 2 elements + math-segment-only indexing is the precision stance: chemistry false positives over free prose would pollute the formula index with garbage species; the query-side anchored rule buys plain-formula queries without that index-side risk.
+- mhchem-style canonicalization without RDKit covers the dominant real-world equivalence (`H2SO4` family, charges, hydrates, simple states, paren groups); structural/isomer equivalence stays out of scope until an explicit dependency decision.
+- Case sensitivity is chemistry semantics, not a bug: `Co`/`CO` and `No`/`NO` are different substances; folding case would merge them.
+
+**Rebuild boundary**:
+- Chemistry routing changes `normalizeFormula` output only for chemistry-shaped inputs; chunk content, chunk identity, and vectors are unaffected. KBs whose formula index was already backfilled before this change keep their pre-chemistry generic signatures for chemistry-bearing display formulas; per ADR-022's standing obligation, normalization-rule changes require dropping and rebuilding the `formulas` table if exact formula matching misbehaves on such KBs.
+
+---
+
+## ADR-024: Retrieval quality is gated by a byte-deterministic fixture eval harness (`npm run eval`); live-corpus runs are advisory
+
+**Status**: Decided
+
+**Background**: Through Layer 3, retrieval quality claims rested on dogfood impressions and one-off probe queries. Each layer changed indexing text, metadata, and ranking, and nothing mechanically prevented a regression from shipping: a ranking tweak that silently breaks math-notation recall would pass every unit test that does not assert end-to-end retrieval on golden questions.
+
+**Decision**:
+- `eval/golden/*.json` holds per-domain golden files (math-notation, formula, chem, units, code, prose, labels). Entries carry `{ id, query, mode, kb?, expect: { file_path | path_prefix, min_score?, must_reason? } }` — expectations assert file-level hits, not exact ranks or scores.
+- `eval/run.ts` is the runner with two modes. `--fixture` (default, the hard gate) builds an ephemeral KB from committed fixtures, runs every kb-less golden query, prints recall@k with a per-domain table, and exits 1 on any miss. `--kb <name>` runs read-only against an existing KB in the default knowledge dir (only entries whose `kb` field matches), is advisory only, and exits 0 unless the KB is missing or the run fails.
+- Byte-determinism is the fixture-mode contract: the fixture build asserts the pinned embedding signature against the warm-cache local model before any query runs, iteration is sorted everywhere, and the report contains no timestamps, durations, or chunk ids. Two consecutive runs must produce byte-identical reports.
+- Wiring: `npm run eval` rebuilds and runs `dist/eval/run.js` (the runner imports built engine output); CLI passthrough works as `npm run eval -- --kb llm-papers`. The ratified `package.json` change is the single `scripts.eval` line — no dependency changes.
+- Golden files grow per domain as layers land; the runner globs all files, so domains evolve independently without runner changes.
+
+**Rationale**:
+- A deterministic golden gate converts "retrieval feels fine" into a regression test: any indexing, chunking, normalization, or ranking change that flips a golden result fails visibly instead of shipping as a vague quality drift.
+- Fixture mode gates because committed fixtures are frozen; the live corpus evolves (new documents, re-embeddings, schema migrations), so live runs answer "does this still work on real data" without gating releases on a moving target.
+- Byte-determinism is what makes eval diffs meaningful: nondeterministic recall reports hide regressions inside run-to-run noise, and a deterministic report makes the two-consecutive-runs check itself a one-line verification.
+- File-level expectations (instead of exact rank/score assertions) keep the gate stable under benign re-ranking while still failing on true misses.
+
+---
+
+## ADR-025: Label references resolve through scope-key hashing (schema v7) with a dormant dependency fusion leg
+
+**Status**: Decided
+
+**Background**: LaTeX documents cross-reference through `\label{}`/`\ref{}` families, and a query naming a label ("theorem:main") should retrieve the defining chunk and the chunks that reference it. Label names are only meaningful within a file scope: multi-file projects routinely define the same label in several files, and split documents (`\input`) break single-file assumptions. Guessing a resolution across files would inject wrong-document evidence with formula-grade confidence.
+
+**Decision**:
+- `extractTexRefs()` in `math-text.ts` extracts `\ref`, `\eqref`, `\cref`, `\Cref`, and `\autoref` targets (deduped, capped at `MAX_REFS = 40`) beside the existing `extractTexLabels`; the chunker LaTeX path threads `metadata.refs` alongside the existing `metadata.labels`.
+- `resolveLabelTarget()` encodes the scoping rule as a pure function: the scope key is `sha256(relPath + "\0" + label)`; a same-file definition is preferred; on collision (same label defined in more than one file) or zero matches the edge resolves as `unresolved` — never guessed.
+- Schema v7 is a pure-SQL migration cloning the formulas pattern: a `label_edges` table (`id` = sha256 of `kb_id`, `src_chunk_id`, `scope_key` joined by `\0`; `target_label`, `scope_key`, nullable `resolved_chunk_id` and `target_content_hash`, `kind` ∈ ref|label|link, `indexed_at`) with `(kb_id, src_chunk_id)` and `(kb_id, scope_key)` indexes, plus a `knowledge_bases.label_graph_built` flag column. The backfill runs once per KB (flag + in-process guard, fail-open wrap), scanning chunk `metadata_json`.
+- Dependency fusion leg (engine search, post-merge, pre-threshold, beside formula fusion): a retrieved or injected chunk with resolved outgoing edges walks depth 1. Already-retrieved referenced chunks gain `DEPENDENCY_BOOST = 0.25` (ranking constant, `FORMULA_BOOST`-style); absent ones are injected with a base score of exactly 0.25 before the trust multiplier, `match_reason: "dependency"`, and `depends_on` provenance (`label`, `chunk_id`, `pinned`). Caps: 2 edges consumed per triggering chunk, 10 injected candidates per query. KB/file filters are respected, and injection bypasses the hybrid confidence threshold — same ratified rationale as formula evidence. Unresolved edges are recorded, never dropped or guessed; their audit surfacing is deferred (L5).
+- Dormant contract: zero edges means zero work. Queries without label matches keep byte-identical results to the pre-label-graph behavior, and the whole path adds no new npm dependency.
+
+**Rationale**:
+- Scope-key resolution mirrors LaTeX's own semantics — labels are scoped, not global — and sha256 keys follow the repo convention already used for chunk identity and formula-row ids.
+- Unresolved-not-guessed is the trust stance: a guessed cross-file resolution returns plausible but wrong-document evidence with injection-grade confidence, which is worse than returning nothing; recording unresolved edges keeps the graph auditable for L5.
+- The dependency leg deliberately reuses the formula-leg architecture (boost + capped injection + threshold bypass) because the evidence class is identical: a structured index hit, not a lexical-prose score. The lower boost (0.25 vs 0.35) and tight caps keep one hot label from flooding top results.
+- The once-per-KB flag-guarded backfill keeps first-query cost bounded and predictable, consistent with the Layer 3 formula index posture.
+
+**Rebuild boundary**:
+- `metadata.refs` changes `metadata_json`, which is an input to the chunk identity hash: every LaTeX-bearing chunk re-hashes, so the first `knowledge_update` after upgrading re-embeds affected LaTeX files (the ADR-020 rebuild-boundary precedent). Non-LaTeX KBs keep identical chunk hashes and vectors; the v6→v7 migration itself is additive and runs automatically on KB open.
