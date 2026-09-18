@@ -1,0 +1,32 @@
+[
+	{
+		"id": "oauth-refresh-token",
+		"query": "refreshAccessToken",
+		"mode": "fast",
+		"expect": { "file_path": "code-oauth-service.md" }
+	},
+	{
+		"id": "rate-limiter-bucket",
+		"query": "TokenBucketRateLimiter refill",
+		"mode": "fast",
+		"expect": { "file_path": "code-rate-limiter.md" }
+	},
+	{
+		"id": "lru-cache-eviction",
+		"query": "LRUCache eviction",
+		"mode": "fast",
+		"expect": { "file_path": "code-lru-cache.md" }
+	},
+	{
+		"id": "retry-exponential-backoff",
+		"query": "retryWithBackoff jitter",
+		"mode": "fast",
+		"expect": { "file_path": "code-retry-backoff.md" }
+	},
+	{
+		"id": "bst-insert",
+		"query": "BinarySearchTree insert",
+		"mode": "fast",
+		"expect": { "file_path": "code-binary-search-tree.md" }
+	}
+]

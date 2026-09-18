@@ -1,0 +1,32 @@
+[
+	{ "id": "mc2-unicode", "query": "mc²", "mode": "fast", "expect": { "file_path": "math-mass-energy.md" } },
+	{ "id": "mc2-ascii", "query": "mc^2", "mode": "fast", "expect": { "file_path": "math-mass-energy.md" } },
+	{ "id": "emc2-unicode", "query": "E = mc²", "mode": "fast", "expect": { "file_path": "math-mass-energy.md" } },
+	{
+		"id": "mc2-pdf-anchor",
+		"query": "E = mc^2 mass-energy equivalence particle form of energy",
+		"mode": "fast",
+		"expect": { "file_path": "fixture-paper.pdf" }
+	},
+	{ "id": "alpha-unicode", "query": "α", "mode": "fast", "expect": { "file_path": "math-alpha-decay.md" } },
+	{
+		"id": "alpha-command",
+		"query": "\\alpha notation nuclear physics",
+		"mode": "fast",
+		"expect": { "file_path": "math-alpha-decay.md" }
+	},
+	{ "id": "x2-pow2", "query": "x^2", "mode": "fast", "expect": { "file_path": "math-square-power.md" } },
+	{
+		"id": "x2y2-circle",
+		"query": "x² + y² = r²",
+		"mode": "fast",
+		"expect": { "file_path": "math-square-power.md" }
+	},
+	{ "id": "omega-ohm", "query": "Ω", "mode": "fast", "expect": { "file_path": "math-omega-notation.md" } },
+	{
+		"id": "alpha-leq-beta",
+		"query": "α ≤ β",
+		"mode": "fast",
+		"expect": { "file_path": "math-greek-inequality.md" }
+	}
+]

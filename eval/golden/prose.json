@@ -1,0 +1,85 @@
+[
+	{
+		"id": "einstein-1905-relativity",
+		"query": "Albert Einstein 1905 paper special relativity inertia",
+		"mode": "hybrid",
+		"expect": { "file_path": "math-mass-energy.md" }
+	},
+	{
+		"id": "alpha-decay-nucleus",
+		"query": "radioactive decay atomic nucleus emits an alpha particle",
+		"mode": "hybrid",
+		"expect": { "file_path": "math-alpha-decay.md" }
+	},
+	{
+		"id": "circle-radius-geometry",
+		"query": "polynomial expansion circle of radius one geometry class",
+		"mode": "hybrid",
+		"expect": { "file_path": "math-square-power.md" }
+	},
+	{
+		"id": "omega-circuit-analysis",
+		"query": "angular frequency circuit analysis resistance values",
+		"mode": "hybrid",
+		"expect": { "file_path": "math-omega-notation.md" }
+	},
+	{
+		"id": "pdf-rest-mass-energy",
+		"query": "rest mass of a particle is a form of energy",
+		"mode": "hybrid",
+		"expect": { "file_path": "fixture-paper.pdf" }
+	},
+	{
+		"id": "token-bucket-requests",
+		"query": "token bucket controls how many requests a client may make",
+		"mode": "hybrid",
+		"expect": { "file_path": "code-rate-limiter.md" }
+	},
+	{
+		"id": "lru-oldest-entry",
+		"query": "least recently used cache eviction of the oldest entry",
+		"mode": "hybrid",
+		"expect": { "file_path": "code-lru-cache.md" }
+	},
+	{
+		"id": "discriminant-real-roots",
+		"query": "the discriminant determines the number of real roots",
+		"mode": "hybrid",
+		"expect": { "file_path": "formula-quadratic.md" }
+	},
+	{
+		"id": "kb-scaled-dot-product-attention",
+		"query": "scaled dot-product attention mechanism",
+		"mode": "hybrid",
+		"kb": "llm-papers",
+		"expect": { "file_path": "foundations/1706.03762.pdf" }
+	},
+	{
+		"id": "kb-kimi-delta-attention",
+		"query": "Kimi Delta Attention architecture",
+		"mode": "hybrid",
+		"kb": "llm-papers",
+		"expect": { "file_path": "2026-models/kimi-k3-official.md" }
+	},
+	{
+		"id": "kb-qwen-gdn-hybrid",
+		"query": "Qwen sparse attention GDN hybrid",
+		"mode": "hybrid",
+		"kb": "llm-papers",
+		"expect": { "file_path": "2026-models/qwen3.8-official.md" }
+	},
+	{
+		"id": "kb-mla-latent-compression",
+		"query": "multi-head latent attention MLA compression",
+		"mode": "hybrid",
+		"kb": "llm-papers",
+		"expect": { "file_path": "foundations/2412.19437.pdf" }
+	},
+	{
+		"id": "kb-r1-reinforcement-reasoning",
+		"query": "reinforcement learning reasoning R1",
+		"mode": "hybrid",
+		"kb": "llm-papers",
+		"expect": { "file_path": "foundations/2501.12948.pdf" }
+	}
+]

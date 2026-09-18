@@ -1,0 +1,38 @@
+[
+	{
+		"id": "tex-inline-mass-energy",
+		"query": "$E=mc^{2}$",
+		"mode": "hybrid",
+		"expect": { "file_path": "formula-mass-energy.md" }
+	},
+	{
+		"id": "plain-baseline-mass-energy",
+		"query": "e=mc^2",
+		"mode": "fast",
+		"expect": { "file_path": "formula-mass-energy.md" }
+	},
+	{
+		"id": "tex-command-injection",
+		"query": "\\mathrm{E}\\!=\\!mc^2",
+		"mode": "fast",
+		"expect": { "file_path": "formula-mass-energy.md", "must_reason": "formula" }
+	},
+	{
+		"id": "tex-gaussian-integral",
+		"query": "$\\int_0^\\infty e^{-x^2} dx$",
+		"mode": "hybrid",
+		"expect": { "file_path": "formula-gaussian.md" }
+	},
+	{
+		"id": "plain-quadratic-roots",
+		"query": "quadratic formula roots",
+		"mode": "hybrid",
+		"expect": { "file_path": "formula-quadratic.md" }
+	},
+	{
+		"id": "tex-quadratic-formula",
+		"query": "$x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}$",
+		"mode": "hybrid",
+		"expect": { "file_path": "formula-quadratic.md" }
+	}
+]
