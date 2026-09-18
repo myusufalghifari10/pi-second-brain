@@ -47,7 +47,8 @@
 		"test": "vitest --run test/unit/",
 		"test:e2e": "vitest --run test/e2e/",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
-		"bench": "vitest bench test/bench/"
+		"bench": "vitest bench test/bench/",
+		"eval": "npm run -s build && node dist/eval/run.js"
 	},
 	"dependencies": {
 		"@huggingface/transformers": "3.8.1",
