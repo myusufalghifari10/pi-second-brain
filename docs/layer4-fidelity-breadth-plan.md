@@ -213,6 +213,19 @@ bare-TeX rule already covers `\ce{…}`). Cap and reject semantics unchanged (L3
   work (dormant path).
 - Refusal semantics: unresolved edges are recorded, never guessed; they surface in v1 as
   `unresolved: true` on the edge (auditability deferred to L5).
+- Ratified narrowing (post-review): formula-injected triggers contribute `depends_on` provenance
+  only — their targets are neither boosted nor injected (injection candidates derive solely from
+  the retrieved set) — and triggers come from the pre-threshold retrieved set. Both corners are
+  conservative and documented in ADR-025; a chunk injected by BOTH the formula and dependency
+  legs must appear exactly once (locked regression test).
+
+**Post-review ratifications (2026-09-18, correctness review):** (1) formula-injected triggers walk
+their edges for `depends_on` provenance only — their targets are neither boosted nor injected
+(conservative narrowing of "retrieved/injected", mirrored in ADR-025); (2) triggers derive from the
+pre-threshold retrieved set, so sub-threshold chunks can still inject their dependencies (harmless:
+referenced chunks are evaluated against full filters); (3) `findResolvedLabelEdges` is kb-scoped
+(index-applicable); (4) the OCR setting is part of the conversion cache key; (5) edge-cap ordering
+uses a byte-stable comparator, not `localeCompare`.
 
 ## §4 Worker contracts & waves
 

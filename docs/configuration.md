@@ -101,6 +101,8 @@ PDF extraction supports an optional external converter sidecar. When `marker` (`
 | `PI_KNOWLEDGE_PDF_SIDECAR_MARKER_CMD` | `marker_single` | Binary name or path used by the marker sidecar adapter. |
 | `PI_KNOWLEDGE_PDF_SIDECAR_DOCLING_CMD` | `docling` | Binary name or path used by the docling sidecar adapter. |
 | `PI_KNOWLEDGE_PDF_SIDECAR_CMD` | unset | Full argv template that overrides built-in sidecar command construction, for example `node /path/to/custom-sidecar.mjs {input} {output_dir}`. `{input}` and `{output_dir}` placeholders are substituted, the template is split on whitespace, and it is executed as an argv array, never through a shell. When set, availability detection probes the template's first token with `--help`. |
+| `PI_KNOWLEDGE_OCR_ENGINE` | `auto` | OCR sidecar mode for caption-less images: `auto` probes `tesseract --version` (10 s budget, cached per process) and OCRs only images that have no alt text and no adjacent caption line; `off` never spawns anything. OCR failures resolve to "no caption", never an error. |
+| `PI_KNOWLEDGE_OCR_CMD` | unset | Full argv template that overrides the OCR binary, for tests or custom OCR tools. Same substitution and whitespace-split rules as `PI_KNOWLEDGE_PDF_SIDECAR_CMD`. The OCR setting is part of the conversion cache key, so toggling it invalidates cached markdown. |
 
 Converted chunks keep `file_type: "pdf"` so existing `file_type` filters keep working, and record the converter in chunk metadata plus a `Converter: <name>` context-prefix line.
 
