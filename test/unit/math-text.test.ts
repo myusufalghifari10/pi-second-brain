@@ -17,7 +17,7 @@ import {
 } from "../../src/indexer/math-text.ts";
 
 describe("MATH_UNICODE_MAP", () => {
-	it("has exactly 92 entries", () => expect(Object.keys(MATH_UNICODE_MAP)).toHaveLength(92));
+	it("has exactly 95 entries", () => expect(Object.keys(MATH_UNICODE_MAP)).toHaveLength(95));
 	it("has exactly 15 superscript folds", () => expect(Object.keys(SUPERSCRIPT_FOLDS)).toHaveLength(15));
 	it("has exactly 14 subscript folds", () => expect(Object.keys(SUBSCRIPT_FOLDS)).toHaveLength(14));
 	it("fold sets and map do not overlap", () => {

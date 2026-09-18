@@ -102,6 +102,12 @@ export const MATH_UNICODE_MAP: Record<string, string> = {
 	"°": "degree",
 	ℏ: "hbar",
 	ℓ: "ell",
+	// Unit glyphs (3) — L4 §3.2: fold to the same words as their Greek counterparts
+	// (µ≡μ→mu, Ω≡Ω→omega) so both codepoints hit identical FTS tokens; Å U+212B
+	// (angstrom sign) → angstrom — the Latin letter U+00C5 is deliberately unmapped.
+	µ: "mu",
+	"\u212B": "angstrom",
+	Ω: "omega",
 };
 
 // Superscript/subscript code points fold directly to plain alphanumeric

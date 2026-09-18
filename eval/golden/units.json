@@ -1,0 +1,32 @@
+[
+	{
+		"id": "units-newton-metre-torque",
+		"query": "torque newton metre N·m wrench setting",
+		"mode": "hybrid",
+		"expect": { "file_path": "units-mechanics.md" }
+	},
+	{
+		"id": "units-kilowatt-hour-energy",
+		"query": "electricity energy consumption kilowatt hour kW·h heater",
+		"mode": "hybrid",
+		"expect": { "file_path": "units-mechanics.md" }
+	},
+	{
+		"id": "units-pascal-second-viscosity",
+		"query": "dynamic viscosity Pa·s pascal second water honey",
+		"mode": "hybrid",
+		"expect": { "file_path": "units-mechanics.md" }
+	},
+	{
+		"id": "units-ohm-metre-resistivity",
+		"query": "electrical resistivity ohm metre Ω·m copper conductor",
+		"mode": "hybrid",
+		"expect": { "file_path": "units-mechanics.md" }
+	},
+	{
+		"id": "units-microgram-dose",
+		"query": "vitamin tablet pharmacology dose microgram µg",
+		"mode": "hybrid",
+		"expect": { "file_path": "units-mechanics.md" }
+	}
+]
