@@ -8,6 +8,11 @@ export const MIN_HYBRID_SCORE = 0.18;
 // per already-retrieved chunk as score += FORMULA_BOOST * formulaScore (formulaScore in [0,1]).
 export const FORMULA_BOOST = 0.35;
 
+// Layer 4 label-graph dependency fusion (spec §3.5 of docs/layer4-fidelity-breadth-plan.md):
+// flat boost for depth-1 referenced chunks; injected dependency chunks score exactly
+// DEPENDENCY_BOOST before the kb trust multiplier.
+export const DEPENDENCY_BOOST = 0.25;
+
 export const FILE_TYPE_ALIASES: Record<string, string> = {
 	csharp: "csharp",
 	cs: "csharp",

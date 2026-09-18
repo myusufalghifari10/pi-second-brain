@@ -21,6 +21,7 @@ export interface KnowledgeBase {
 	embedding_signature: string | null;
 	embedding_dimension: number | null;
 	formula_index_built: number;
+	label_graph_built: number;
 	status: "ready" | "indexing" | "error" | "stale";
 }
 
@@ -78,7 +79,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const ITERATION_BATCH_SIZE = 500;
 
 const FORMULAS_SCHEMA_SQL = `
@@ -119,6 +120,27 @@ CREATE TRIGGER IF NOT EXISTS formulas_au AFTER UPDATE ON formulas BEGIN
 END;
 `;
 
+// Layer 4 label graph (spec §3.5 of docs/layer4-fidelity-breadth-plan.md): edges are recorded
+// for every outgoing ref of a chunk. resolved_chunk_id / target_content_hash stay NULLABLE —
+// unresolved edges are recorded, never guessed (resolution happens in the indexer layer).
+const LABEL_EDGES_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS label_edges (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  src_chunk_id TEXT NOT NULL,
+  target_label TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  resolved_chunk_id TEXT,
+  target_content_hash TEXT,
+  kind TEXT NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (src_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_label_edges_kb_src ON label_edges(kb_id, src_chunk_id);
+CREATE INDEX IF NOT EXISTS idx_label_edges_kb_scope ON label_edges(kb_id, scope_key);
+`;
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER NOT NULL
@@ -139,6 +161,7 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   embedding_signature TEXT,
   embedding_dimension INTEGER,
   formula_index_built INTEGER NOT NULL DEFAULT 0,
+  label_graph_built INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'ready'
 );
 
@@ -223,6 +246,7 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
 END;
 
 ${FORMULAS_SCHEMA_SQL}
+${LABEL_EDGES_SCHEMA_SQL}
 `;
 
 type DatabaseConstructor = typeof Database;
@@ -459,6 +483,14 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			}
 			continue;
 		}
+		if (v === 7) {
+			db.exec(LABEL_EDGES_SCHEMA_SQL);
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "label_graph_built")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN label_graph_built INTEGER NOT NULL DEFAULT 0");
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -520,6 +552,7 @@ export function deleteKB(db: Database.Database, id: string): void {
 	db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM formulas WHERE kb_id = ?").run(id);
+	db.prepare("DELETE FROM label_edges WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
 }
@@ -897,6 +930,113 @@ export function listChunksForFormulaBackfill(
 		kb_id: string;
 		metadata_json: string;
 	}>;
+}
+
+// --- CRUD: Label Edges ---
+// Like formula rows, label edge rows arrive PRE-resolved (resolution lives in the indexer layer
+// via resolveLabelTarget); storage never resolves. id = sha256 of kb_id, src_chunk_id, scope_key
+// joined by NUL — same convention as formulaRowId.
+
+export type LabelEdgeKind = "ref" | "label" | "link";
+
+export interface LabelEdgeInsert {
+	targetLabel: string;
+	scopeKey: string;
+	resolvedChunkId: string | null;
+	targetContentHash: string | null;
+	kind: LabelEdgeKind;
+}
+
+export interface ResolvedLabelEdgeRow {
+	src_chunk_id: string;
+	target_label: string;
+	scope_key: string;
+	resolved_chunk_id: string;
+	target_content_hash: string | null;
+}
+
+function labelEdgeRowId(kbId: string, chunkId: string, scopeKey: string): string {
+	return createHash("sha256").update(`${kbId}\0${chunkId}\0${scopeKey}`).digest("hex");
+}
+
+export function replaceLabelEdgesForChunk(
+	db: Database.Database,
+	kbId: string,
+	chunkId: string,
+	rows: LabelEdgeInsert[],
+): void {
+	const replace = db.transaction((items: LabelEdgeInsert[]) => {
+		db.prepare("DELETE FROM label_edges WHERE kb_id = ? AND src_chunk_id = ?").run(kbId, chunkId);
+		if (items.length === 0) return;
+		const stmt = db.prepare(
+			`INSERT INTO label_edges (id, kb_id, src_chunk_id, target_label, scope_key, resolved_chunk_id, target_content_hash, kind, indexed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		const now = Date.now();
+		for (const row of items) {
+			stmt.run(
+				labelEdgeRowId(kbId, chunkId, row.scopeKey),
+				kbId,
+				chunkId,
+				row.targetLabel,
+				row.scopeKey,
+				row.resolvedChunkId,
+				row.targetContentHash,
+				row.kind,
+				now,
+			);
+		}
+	});
+	replace(rows);
+}
+
+export function deleteLabelEdgesForChunks(db: Database.Database, chunkIds: string[]): void {
+	if (chunkIds.length === 0) return;
+	const batchSize = 500;
+	const deleteBatch = db.transaction((batch: string[]) => {
+		const placeholders = batch.map(() => "?").join(",");
+		db.prepare(`DELETE FROM label_edges WHERE src_chunk_id IN (${placeholders})`).run(...batch);
+	});
+	for (let offset = 0; offset < chunkIds.length; offset += batchSize) {
+		deleteBatch(chunkIds.slice(offset, offset + batchSize));
+	}
+}
+
+export function markLabelGraphBuilt(db: Database.Database, kbId: string): void {
+	db.prepare("UPDATE knowledge_bases SET label_graph_built = 1 WHERE id = ?").run(kbId);
+}
+
+export function listChunksForLabelBackfill(
+	db: Database.Database,
+): Array<{ id: string; kb_id: string; metadata_json: string; file_path: string; content_hash: string }> {
+	return db
+		.prepare("SELECT id, kb_id, metadata_json, file_path, content_hash FROM chunks ORDER BY rowid")
+		.all() as Array<{
+		id: string;
+		kb_id: string;
+		metadata_json: string;
+		file_path: string;
+		content_hash: string;
+	}>;
+}
+
+export function findResolvedLabelEdges(db: Database.Database, chunkIds: string[]): ResolvedLabelEdgeRow[] {
+	if (chunkIds.length === 0) return [];
+	const results: ResolvedLabelEdgeRow[] = [];
+	const batchSize = 500;
+	for (let offset = 0; offset < chunkIds.length; offset += batchSize) {
+		const batch = chunkIds.slice(offset, offset + batchSize);
+		const placeholders = batch.map(() => "?").join(",");
+		const rows = db
+			.prepare(
+				`SELECT src_chunk_id, target_label, scope_key, resolved_chunk_id, target_content_hash
+				 FROM label_edges
+				 WHERE resolved_chunk_id IS NOT NULL AND src_chunk_id IN (${placeholders})`,
+			)
+			.all(...batch) as ResolvedLabelEdgeRow[];
+		results.push(...rows);
+	}
+	return results;
 }
 
 export function findExactFormulas(

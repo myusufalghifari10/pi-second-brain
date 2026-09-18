@@ -61,12 +61,12 @@ describe("formula storage schema (F3)", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("creates schema version 6 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
+	it("creates schema version 7 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-storage-formulas-"));
 		tempDirs.push(dir);
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 6 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
 
 			const tables = tableNames(db, "table");
 			expect(tables.has("formulas")).toBe(true);
@@ -97,7 +97,7 @@ describe("formula storage schema (F3)", () => {
 		}
 	});
 
-	it("migrates a legacy v5 database to v6 and preserves chunk data", () => {
+	it("migrates a legacy v5 database to v7 and preserves chunk data", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-storage-formulas-"));
 		tempDirs.push(dir);
 
@@ -123,9 +123,10 @@ describe("formula storage schema (F3)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 6 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
 			expect(tableNames(db, "table").has("formulas")).toBe(true);
 			expect(tableNames(db, "table").has("formulas_fts")).toBe(true);
+			expect(tableNames(db, "table").has("label_edges")).toBe(true);
 			const triggers = tableNames(db, "trigger");
 			expect(triggers.has("formulas_ai")).toBe(true);
 			expect(triggers.has("formulas_ad")).toBe(true);

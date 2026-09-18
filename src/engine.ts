@@ -29,6 +29,7 @@ import {
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
 import { extractQueryFormulas, type NormalizedFormula, normalizeFormula } from "./indexer/formula-normalize.ts";
+import { resolveLabelTarget } from "./indexer/label-resolve.ts";
 import { convertPdf, detectSidecar, resolvePdfSidecarConfig, SidecarError } from "./indexer/pdf-sidecar.ts";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
@@ -36,6 +37,7 @@ import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
 import { tokenizeForSearch } from "./search/query.ts";
 import {
+	DEPENDENCY_BOOST,
 	FORMULA_BOOST,
 	hasAnyLexicalEvidence,
 	hasEnoughLexicalEvidence,
@@ -60,8 +62,10 @@ import {
 	deleteChunksByIds,
 	deleteFormulasForChunks,
 	deleteKB,
+	deleteLabelEdgesForChunks,
 	deleteSymbolsByKB,
 	findExactFormulas,
+	findResolvedLabelEdges,
 	finishIndexingJob,
 	getChunkById,
 	getChunkCount,
@@ -76,11 +80,16 @@ import {
 	iterateChunksByKB,
 	type KnowledgeBase,
 	type KnowledgeSymbol,
+	type LabelEdgeInsert,
 	listChunksForFormulaBackfill,
+	listChunksForLabelBackfill,
 	listKBs,
 	markFormulaIndexBuilt,
+	markLabelGraphBuilt,
 	openDatabase,
+	type ResolvedLabelEdgeRow,
 	replaceFormulasForChunk,
+	replaceLabelEdgesForChunk,
 	searchFormulasFTS,
 	searchSymbols,
 	startIndexingJob,
@@ -129,9 +138,18 @@ export interface SearchResult {
 		indexed_at: number;
 		source_mtime?: number;
 		stale: boolean;
-		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive" | "formula";
+		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive" | "formula" | "dependency";
 		source_chunk_ids?: string[];
+		// Layer 4 label graph (spec §3.5): resolved outgoing label edges of this chunk. Present
+		// only when the chunk participates in the dependency walk; absent on the dormant path.
+		depends_on?: DependencyEdgeProvenance[];
 	};
+}
+
+export interface DependencyEdgeProvenance {
+	label: string;
+	chunk_id: string;
+	pinned: boolean;
 }
 
 export { CURRENT_EMBEDDING_MODEL } from "./embedding/provider.ts";
@@ -246,6 +264,10 @@ const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 // Layer 3 fuzzy formula leg (spec §3.4.3): top-ranked FTS hit gets 0.8, rank-normalized below.
 const FORMULA_FUZZY_TOP_SCORE = 0.8;
 const FORMULA_INJECTION_LIMIT = 5;
+// Layer 4 label-graph dependency leg (spec §3.5): depth-1 walk consumes at most 2 edges per
+// triggering chunk and injects at most 10 candidates per query.
+const DEPENDENCY_WALK_EDGES_PER_CHUNK = 2;
+const DEPENDENCY_INJECTION_LIMIT = 10;
 
 interface DirectoryScanPlan {
 	files: number;
@@ -955,6 +977,98 @@ function writeFormulaRowsForInsertedChunks(
 	}
 }
 
+// Layer 4 label graph (spec §3.5): unlike formula rows, label edges are a RELATIONAL view of
+// chunk metadata (labels/refs) resolved against the KB's complete file set, so edges are rebuilt
+// once per completed mutation instead of per inserted batch — per-batch resolution against a
+// half-indexed file set would record nondeterministic resolutions.
+function labelGraphInputsFromMetadataJson(metadataJson: string): { labels: string[]; refs: string[] } {
+	try {
+		const parsed = JSON.parse(metadataJson) as { labels?: unknown; refs?: unknown };
+		const labels = Array.isArray(parsed.labels) ? parsed.labels.filter((v): v is string => typeof v === "string") : [];
+		const refs = Array.isArray(parsed.refs) ? parsed.refs.filter((v): v is string => typeof v === "string") : [];
+		return { labels, refs };
+	} catch {
+		return { labels: [], refs: [] };
+	}
+}
+
+// Must mirror label-resolve.ts normalizePath so defining-chunk keys line up with the
+// targetPath that resolveLabelTarget returns.
+function normalizeLabelGraphPath(p: string): string {
+	return p.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+// Full deterministic rebuild of one KB's label edges from chunk metadata. Chunks with no refs
+// get an empty replacement so stale edges are cleared on re-sync. Unresolved edges are recorded
+// with resolved_chunk_id/target_content_hash NULL — never guessed.
+function rebuildLabelGraphForKB(db: Database.Database, kbId: string): void {
+	const kbChunks: Array<{ id: string; file_path: string; content_hash: string; metadata_json: string }> = [];
+	const labelFiles = new Map<string, string[]>();
+	const definingChunkByFileLabel = new Map<string, { chunkId: string; contentHash: string }>();
+	for (const chunk of listChunksForLabelBackfill(db)) {
+		if (chunk.kb_id !== kbId) continue;
+		kbChunks.push(chunk);
+		const { labels } = labelGraphInputsFromMetadataJson(chunk.metadata_json);
+		for (const label of labels) {
+			let files = labelFiles.get(label);
+			if (!files) {
+				files = [];
+				labelFiles.set(label, files);
+			}
+			files.push(chunk.file_path);
+			const key = `${normalizeLabelGraphPath(chunk.file_path)}\0${label}`;
+			if (!definingChunkByFileLabel.has(key)) {
+				definingChunkByFileLabel.set(key, { chunkId: chunk.id, contentHash: chunk.content_hash });
+			}
+		}
+	}
+	for (const chunk of kbChunks) {
+		const { refs } = labelGraphInputsFromMetadataJson(chunk.metadata_json);
+		const rows: LabelEdgeInsert[] = [];
+		const seenScopeKeys = new Set<string>();
+		for (const ref of refs) {
+			const resolution = resolveLabelTarget(chunk.file_path, ref, labelFiles.get(ref) ?? []);
+			if (seenScopeKeys.has(resolution.scopeKey)) continue;
+			seenScopeKeys.add(resolution.scopeKey);
+			let resolvedChunkId: string | null = null;
+			let targetContentHash: string | null = null;
+			if (resolution.targetPath) {
+				const target = definingChunkByFileLabel.get(`${resolution.targetPath}\0${ref}`);
+				if (target) {
+					resolvedChunkId = target.chunkId;
+					targetContentHash = target.contentHash;
+				}
+			}
+			rows.push({ targetLabel: ref, scopeKey: resolution.scopeKey, resolvedChunkId, targetContentHash, kind: "ref" });
+		}
+		replaceLabelEdgesForChunk(db, kbId, chunk.id, rows);
+	}
+}
+
+// Groups resolved edges per triggering chunk, keeping the first `capPerTrigger` edges in a
+// deterministic (src, label, scope) order — the depth-1 walk cap of spec §3.5.
+function edgesGroupedPerTrigger(
+	rows: ResolvedLabelEdgeRow[],
+	capPerTrigger: number,
+): Map<string, ResolvedLabelEdgeRow[]> {
+	const sorted = [...rows].sort(
+		(a, b) =>
+			a.src_chunk_id.localeCompare(b.src_chunk_id) ||
+			a.target_label.localeCompare(b.target_label) ||
+			a.scope_key.localeCompare(b.scope_key),
+	);
+	const grouped = new Map<string, ResolvedLabelEdgeRow[]>();
+	for (const row of sorted) {
+		const edges = grouped.get(row.src_chunk_id);
+		if (edges) {
+			if (edges.length < capPerTrigger) edges.push(row);
+			continue;
+		}
+		grouped.set(row.src_chunk_id, [row]);
+	}
+	return grouped;
+}
+
 // FTS query for the fuzzy formula leg: quoted OR-joined canonical tokens, following the
 // bm25.ts quoted-term discipline (raw user text is never passed as FTS syntax).
 // searchFormulasFTS re-validates the shape and reduces anything else to a safe phrase.
@@ -1018,6 +1132,8 @@ export class KnowledgeEngine {
 	private activeMutations = new Map<string, Promise<unknown>>();
 	// Layer 3 in-process backfill guard (complements knowledge_bases.formula_index_built).
 	private formulaIndexesEnsured = new Set<string>();
+	// Layer 4 in-process label-graph guard (complements knowledge_bases.label_graph_built).
+	private labelGraphsEnsured = new Set<string>();
 	private disposing = false;
 
 	private runExclusive<T>(keys: string | string[], description: string, operation: () => Promise<T> | T): Promise<T> {
@@ -1069,6 +1185,25 @@ export class KnowledgeEngine {
 					replaceFormulasForChunk(this.db, kbId, chunk.id, rows);
 				}
 				markFormulaIndexBuilt(this.db, kbId);
+			} catch {
+				// fail-open: retrying is intentionally skipped for this process
+			}
+		}
+	}
+
+	// Layer 4 backfill (spec §3.5): verbatim L3 guard pattern — persistent flag + in-process Set
+	// + fail-open. Zero-latex KBs rebuild to zero edges and stay dormant. Called at the END of a
+	// successful add (label edges need the complete KB file set, unlike per-chunk formula rows).
+	private ensureLabelGraphsBuilt(kbIds: string[]): void {
+		if (!this.db) return;
+		for (const kbId of kbIds) {
+			if (this.labelGraphsEnsured.has(kbId)) continue;
+			this.labelGraphsEnsured.add(kbId);
+			try {
+				const kb = getKB(this.db, kbId);
+				if (!kb || kb.label_graph_built === 1) continue;
+				rebuildLabelGraphForKB(this.db, kbId);
+				markLabelGraphBuilt(this.db, kbId);
 			} catch {
 				// fail-open: retrying is intentionally skipped for this process
 			}
@@ -1362,6 +1497,8 @@ export class KnowledgeEngine {
 				skipped_total: latestSkippedTotal,
 				added_chunks: chunkCount,
 			});
+			// Layer 4 (spec §3.5): build the label graph once the KB's complete file set exists.
+			this.ensureLabelGraphsBuilt([kb.id]);
 			finishIndexingJob(this.db, kb.id, "succeeded", readyMessage);
 			onProgress?.(readyMessage);
 			return { kb: savedKB, chunkCount };
@@ -1730,10 +1867,18 @@ export class KnowledgeEngine {
 			addedVectorPath = undefined;
 			if (idsToRemove.length > 0) {
 				deleteFormulasForChunks(this.db, idsToRemove);
+				deleteLabelEdgesForChunks(this.db, idsToRemove);
 				deleteChunksByIds(this.db, idsToRemove);
 			}
 			deleteSymbolsByKB(this.db, kb.id);
 			insertSymbols(this.db, kb.id, stagedSymbols);
+			// Layer 4 (spec §3.5): re-sync label edges against the final chunk set. Unconditional
+			// (not flag-guarded) because updates can change refs of previously built KBs. Fail-open.
+			try {
+				rebuildLabelGraphForKB(this.db, kb.id);
+			} catch {
+				// fail-open: stale label edges are tolerated until the next successful mutation
+			}
 
 			updateKBEmbeddingMetadata(
 				this.db,
@@ -1766,6 +1911,7 @@ export class KnowledgeEngine {
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			if (insertedChunkIds.length > 0) {
 				deleteFormulasForChunks(this.db, insertedChunkIds);
+				deleteLabelEdgesForChunks(this.db, insertedChunkIds);
 				deleteChunksByIds(this.db, insertedChunkIds);
 				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 			}
@@ -1967,6 +2113,47 @@ export class KnowledgeEngine {
 				if (formulaScore !== undefined) result.score += FORMULA_BOOST * formulaScore;
 			}
 		}
+		// Layer 4 label-graph dependency fusion (spec §3.5): post-merge, pre-threshold, beside the
+		// formula leg. Retrieved chunks carrying resolved outgoing edges walk depth 1: targets that
+		// are already retrieved gain a flat DEPENDENCY_BOOST (self-references excluded); absent
+		// targets are injected after the formula injection leg below; depends_on provenance records
+		// every walked edge. Zero resolved edges ⇒ zero work — dormant-path results stay
+		// byte-identical to pre-L4.
+		const dependsOnByChunkId = new Map<string, DependencyEdgeProvenance[]>();
+		const dependencyInjectedChunkIds = new Set<string>();
+		let dependencyEdgesActive = false;
+		let edgesPerTrigger = new Map<string, ResolvedLabelEdgeRow[]>();
+		this.ensureLabelGraphsBuilt(kbs.map((kb) => kb.id));
+		const labelEdgeRows = findResolvedLabelEdges(
+			db,
+			unique.map((result) => result.chunkId),
+		);
+		if (labelEdgeRows.length > 0) {
+			dependencyEdgesActive = true;
+			edgesPerTrigger = edgesGroupedPerTrigger(labelEdgeRows, DEPENDENCY_WALK_EDGES_PER_CHUNK);
+			const uniqueByChunkId = new Map(unique.map((result) => [result.chunkId, result]));
+			const boostedTargets = new Set<string>();
+			for (const result of unique) {
+				const edges = edgesPerTrigger.get(result.chunkId);
+				if (!edges) continue;
+				const dependsOn: DependencyEdgeProvenance[] = [];
+				for (const edge of edges) {
+					const target = getChunkById(db, edge.resolved_chunk_id);
+					if (!target || !kbById.has(target.kb_id)) continue;
+					dependsOn.push({
+						label: edge.target_label,
+						chunk_id: edge.resolved_chunk_id,
+						pinned: edge.target_content_hash === target.content_hash,
+					});
+					const targetResult = uniqueByChunkId.get(edge.resolved_chunk_id);
+					if (targetResult && targetResult !== result && !boostedTargets.has(edge.resolved_chunk_id)) {
+						boostedTargets.add(edge.resolved_chunk_id);
+						targetResult.score += DEPENDENCY_BOOST;
+					}
+				}
+				if (dependsOn.length > 0) dependsOnByChunkId.set(result.chunkId, dependsOn);
+			}
+		}
 		let scored = unique;
 		if (retrievalMode === "fast") {
 			scored = unique.filter((result) => {
@@ -2023,6 +2210,60 @@ export class KnowledgeEngine {
 			if (formulaInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
 		}
 
+		// Layer 4 dependency injection leg (spec §3.5): referenced chunks absent from the retrieved
+		// set become real results with match_reason "dependency" — filter-first, then capped (10
+		// injections per query), base score exactly DEPENDENCY_BOOST before the kb trust multiplier,
+		// bypassing MIN_HYBRID_SCORE (same ratified rationale as formula evidence). Chunks injected
+		// by the formula leg also trigger the walk ("retrieved/injected", spec §3.5); their
+		// depends_on provenance is recorded here since the pre-threshold pass cannot see them yet.
+		if (dependencyEdgesActive && formulaInjectedChunkIds.size > 0) {
+			const injectedTriggerEdges = edgesGroupedPerTrigger(
+				findResolvedLabelEdges(db, [...formulaInjectedChunkIds]),
+				DEPENDENCY_WALK_EDGES_PER_CHUNK,
+			);
+			for (const [triggerId, edges] of injectedTriggerEdges) {
+				const dependsOn: DependencyEdgeProvenance[] = [];
+				for (const edge of edges) {
+					const target = getChunkById(db, edge.resolved_chunk_id);
+					if (!target || !kbById.has(target.kb_id)) continue;
+					dependsOn.push({
+						label: edge.target_label,
+						chunk_id: edge.resolved_chunk_id,
+						pinned: edge.target_content_hash === target.content_hash,
+					});
+				}
+				if (dependsOn.length > 0) dependsOnByChunkId.set(triggerId, dependsOn);
+			}
+		}
+		if (dependencyEdgesActive) {
+			const retrievedIds = new Set(unique.map((result) => result.chunkId));
+			const candidates: string[] = [];
+			const queued = new Set<string>();
+			for (const result of unique) {
+				for (const edge of edgesPerTrigger.get(result.chunkId) ?? []) {
+					if (edge.resolved_chunk_id === result.chunkId) continue;
+					if (retrievedIds.has(edge.resolved_chunk_id) || queued.has(edge.resolved_chunk_id)) continue;
+					queued.add(edge.resolved_chunk_id);
+					candidates.push(edge.resolved_chunk_id);
+				}
+			}
+			// Cap counts candidates that pass kb scope + metadata filters, so top-10 filter misses
+			// cannot starve filter-passing matches at lower ranks (formula-leg discipline).
+			let injectedCount = 0;
+			for (const chunkId of candidates) {
+				if (injectedCount >= DEPENDENCY_INJECTION_LIMIT) break;
+				const chunk = getChunkById(db, chunkId);
+				const kb = chunk ? kbById.get(chunk.kb_id) : undefined;
+				if (!chunk || !kb) continue;
+				if (normalizedFileType && chunk.file_type !== normalizedFileType) continue;
+				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) continue;
+				dependencyInjectedChunkIds.add(chunkId);
+				filtered.push({ chunkId, score: DEPENDENCY_BOOST * kbTrustMultiplier(kb) });
+				injectedCount += 1;
+			}
+			if (dependencyInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
+		}
+
 		if (mode === "deep" && filtered.length > 0) {
 			const candidates = filtered
 				.slice(0, tuning.deepRerankCandidates)
@@ -2060,6 +2301,7 @@ export class KnowledgeEngine {
 			const results = page.map((r) => {
 				const kb = kbById.get(r.chunk.kb_id);
 				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				const dependsOn = dependsOnByChunkId.get(r.chunk.id);
 				return {
 					content: r.content,
 					file_path: r.chunk.file_path,
@@ -2076,8 +2318,13 @@ export class KnowledgeEngine {
 						indexed_at: r.chunk.indexed_at,
 						source_mtime: sourceMtime,
 						stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
-						match_reason: formulaInjectedChunkIds.has(r.chunk.id) ? "formula" : matchReasonFor(mode),
+						match_reason: formulaInjectedChunkIds.has(r.chunk.id)
+							? "formula"
+							: dependencyInjectedChunkIds.has(r.chunk.id)
+								? "dependency"
+								: matchReasonFor(mode),
 						source_chunk_ids: r.sourceChunkIds,
+						...(dependsOn ? { depends_on: dependsOn } : {}),
 					},
 				};
 			});
@@ -2152,14 +2399,20 @@ export class KnowledgeEngine {
 			provenance: (() => {
 				const kb = kbById.get(r.chunk.kb_id);
 				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				const dependsOn = dependsOnByChunkId.get(r.chunk.id);
 				return {
 					chunk_id: r.chunk.id,
 					chunk_hash: r.chunk.content_hash,
 					indexed_at: r.chunk.indexed_at,
 					source_mtime: sourceMtime,
 					stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
-					match_reason: formulaInjectedChunkIds.has(r.chunk.id) ? "formula" : matchReasonFor(mode),
+					match_reason: formulaInjectedChunkIds.has(r.chunk.id)
+						? "formula"
+						: dependencyInjectedChunkIds.has(r.chunk.id)
+							? "dependency"
+							: matchReasonFor(mode),
 					source_chunk_ids: r.sourceChunkIds,
+					...(dependsOn ? { depends_on: dependsOn } : {}),
 				};
 			})(),
 		}));
@@ -2569,6 +2822,13 @@ export class KnowledgeEngine {
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);
+			// Layer 4 (spec §3.5): build the label graph from the fully imported chunk set. Fail-open.
+			try {
+				rebuildLabelGraphForKB(this.db, kb.id);
+				markLabelGraphBuilt(this.db, kb.id);
+			} catch {
+				// fail-open: retrying is intentionally skipped for this process
+			}
 			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${inserted} chunks`);
 			return { kb: savedKB, chunkCount: inserted };
 		} catch (error) {

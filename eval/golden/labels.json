@@ -1,0 +1,20 @@
+[
+	{
+		"id": "labels-gauss-law-defining",
+		"query": "gauss law electric flux closed surface",
+		"mode": "hybrid",
+		"expect": { "file_path": "labels-notes.md" }
+	},
+	{
+		"id": "labels-flux-conservation",
+		"query": "divergence magnetic flux solenoidal fields",
+		"mode": "hybrid",
+		"expect": { "file_path": "labels-notes.md" }
+	},
+	{
+		"id": "labels-equivalence-note",
+		"query": "surface integral equivalent conservation principle",
+		"mode": "hybrid",
+		"expect": { "file_path": "labels-notes.md" }
+	}
+]
