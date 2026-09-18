@@ -200,6 +200,7 @@ export const MAX_FORMULAS = 10;
 export const MAX_FORMULA_CHARS = 2_000;
 export const MAX_LINKS = 20;
 export const MAX_LABELS = 20;
+export const MAX_REFS = 40;
 export const MAX_TAGS = 20;
 export const MAX_ALIASES = 10;
 
@@ -564,4 +565,18 @@ export function extractTexLabels(text: string): string[] {
 		if (labels.length >= MAX_LABELS) break;
 	}
 	return labels;
+}
+
+// \ref/\eqref/\cref/\Cref/\autoref targets, deduped, capped at MAX_REFS.
+export function extractTexRefs(text: string): string[] {
+	const refs: string[] = [];
+	const seen = new Set<string>();
+	for (const match of text.matchAll(/\\(?:ref|eqref|cref|Cref|autoref)\{([^}]+)\}/g)) {
+		const ref = match[1].trim();
+		if (!ref || seen.has(ref)) continue;
+		seen.add(ref);
+		refs.push(ref);
+		if (refs.length >= MAX_REFS) break;
+	}
+	return refs;
 }

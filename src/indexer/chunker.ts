@@ -7,6 +7,7 @@ import {
 	canonicalizeMathText,
 	extractDisplayFormulas,
 	extractTexLabels,
+	extractTexRefs,
 	extractWikiLinks,
 	MAX_MATH_BLOCK_CHARS,
 	parseFrontmatter,
@@ -853,12 +854,14 @@ function pushLatexChunkFactory(
 	section: LatexSection,
 	filePath: string,
 	labels: string[],
+	refs: string[],
 	chunks: Omit<ChunkInsert, "kb_id">[],
 ) {
 	return (text: string, start: number, end: number, formulas: string[]): void => {
 		if (text.trim().length < 50) return;
 		const metadata: ChunkMetadata = { heading: section.title, breadcrumb: section.breadcrumb };
 		if (labels.length > 0) metadata.labels = labels;
+		if (refs.length > 0) metadata.refs = refs;
 		if (formulas.length > 0) metadata.formulas = formulas;
 		chunks.push(makeChunk(text.trim(), filePath, "latex", start, end, metadata));
 	};
@@ -910,7 +913,8 @@ export function chunkLaTeX(content: string, filePath: string): Omit<ChunkInsert,
 	for (const section of sections) {
 		const sectionText = section.blocks.map((block) => block.text).join("\n\n");
 		const labels = extractTexLabels(sectionText);
-		const pushChunk = pushLatexChunkFactory(section, filePath, labels, chunks);
+		const refs = extractTexRefs(sectionText);
+		const pushChunk = pushLatexChunkFactory(section, filePath, labels, refs, chunks);
 		const lastLine = section.blocks.at(-1)?.endLine ?? 1;
 		assembleChunkBlocks(section.blocks, pushChunk, MARKDOWN_TARGET_TOKENS, lastLine);
 	}
