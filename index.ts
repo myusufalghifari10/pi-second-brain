@@ -174,7 +174,11 @@ async function disposeRuntime(): Promise<void> {
 		runtimePromise = undefined;
 		if (!loaded) return;
 		loaded.watcher.stopAllWatchers();
-		await loaded.engine.dispose({ disposeModels: false });
+		// Full teardown (default disposeModels: true) is the documented session_shutdown contract
+		// (ADR-005, known-pitfalls, extension architecture): active runs drain, then the model
+		// worker is killed so ONNX memory is reclaimed when a session closes. The test-side
+		// dispose({disposeModels:false}) warm-worker path is intentionally NOT used here.
+		await loaded.engine.dispose();
 	})();
 	try {
 		await disposePromise;

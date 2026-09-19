@@ -646,20 +646,34 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("classifies a genuinely aborted sidecar conversion as a user cancel", async () => {
+			// Seed WITHOUT the sidecar env: the unpdf fallback builds a real ready KB.
+			const filePath = join(TEST_DIR, "aborted-conversion-about-authentication.pdf");
+			copyFileSync(FIXTURE_PDF, filePath);
+			await engine.add(filePath, "Aborted PDF");
+			expect(engine.list().find((candidate) => candidate.name === "Aborted PDF")?.status).toBe("ready");
+
+			// Update with the sidecar path pinned on and a genuinely aborted conversion: the KB
+			// SURVIVES (unlike add), so both the cancelled job row and the restored status are
+			// observable — a regression flipping SidecarError("aborted") to the failure branch
+			// would record a "failed" job instead and fail this test.
 			vi.stubEnv(
 				"PI_KNOWLEDGE_PDF_SIDECAR_CMD",
 				`${process.execPath} ${join(import.meta.dirname, "../fixtures/fake-sidecar.mjs")} {input} {output_dir}`,
 			);
-			const filePath = join(TEST_DIR, "aborted-conversion-about-authentication.pdf");
-			copyFileSync(FIXTURE_PDF, filePath);
 			convertPdfMock.mockImplementationOnce(async () => {
-				throw new SidecarError("aborted", "PDF conversion aborted before start: sidecrash.pdf");
+				throw new SidecarError("aborted", "PDF conversion aborted mid-flight: aborted-conversion.pdf");
 			});
 
-			// The cancellation propagates out of add() and the brand-new KB rolls back entirely.
-			await expect(engine.add(filePath, "Aborted PDF")).rejects.toThrow(/aborted/);
-			const kb = engine.list().find((candidate) => candidate.name === "Aborted PDF");
-			expect(kb).toBeUndefined();
+			await expect(engine.update("Aborted PDF")).rejects.toThrow(/aborted/);
+			expect(engine.list().find((candidate) => candidate.name === "Aborted PDF")?.status).toBe("ready");
+			const db = openDatabase(TEST_DIR);
+			try {
+				const kbId = engine.list().find((candidate) => candidate.name === "Aborted PDF")?.id ?? "";
+				const job = getIndexingJob(db, kbId);
+				expect(job?.status).toBe("cancelled");
+			} finally {
+				db.close();
+			}
 		});
 
 		it("fails cleanly when the embedding config turns broken before an update starts", async () => {

@@ -170,4 +170,35 @@ describe("API reranker", () => {
 			"Invalid reranker API response: result index is out of range",
 		);
 	});
+
+	it("dedupes repeated result indexes, keeping the first (best-ranked) occurrence", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				jsonResponse({
+					results: [
+						{ index: 1, relevance_score: 0.98 },
+						{ index: 0, relevance_score: 0.12 },
+						{ index: 1, relevance_score: 0.5 },
+					],
+				}),
+			),
+		);
+
+		const results = await rerankViaApi(
+			"query",
+			[
+				{ chunkId: "chunk-a", content: "first document content" },
+				{ chunkId: "chunk-b", content: "second document content" },
+			],
+			3,
+			baseConfig,
+		);
+
+		// The repeated index must collapse to its first occurrence — exactly 2 unique chunks.
+		expect(results).toEqual([
+			{ chunkId: "chunk-b", score: 0.98 },
+			{ chunkId: "chunk-a", score: 0.12 },
+		]);
+	});
 });

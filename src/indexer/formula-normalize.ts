@@ -233,12 +233,14 @@ export function extractQueryFormulas(query: string): QueryFormulas {
 		}
 		for (const span of spans) addFormula(formulas, span);
 		const remainder = lines.join("\n");
-		if (isBareTexFormula(remainder)) addFormula(formulas, remainder);
-		// L4 F2 (spec §3.1): text segments that full-match the molecular pattern become one
-		// chem formula (the plain query H2SO4 works). Bare-TeX keeps L3 precedence;
-		// cap/reject semantics are unchanged. The chem route mirrors the normalize path's
-		// MAX_FORMULA_CHARS cap so oversized query segments never reach the 118-alternative RE.
-		else if (remainder.length <= MAX_FORMULA_CHARS && isMolecularFormula(remainder)) addFormula(formulas, remainder);
+		// Shared cap above both legs: oversized segments can never yield a formula
+		// (normalizeFormula rejects > MAX_FORMULA_CHARS), so skip both scans entirely.
+		if (remainder.length <= MAX_FORMULA_CHARS) {
+			if (isBareTexFormula(remainder)) addFormula(formulas, remainder);
+			// L4 F2 (spec §3.1): text segments that full-match the molecular pattern become one
+			// chem formula (the plain query H2SO4 works). Bare-TeX keeps L3 precedence.
+			else if (isMolecularFormula(remainder)) addFormula(formulas, remainder);
+		}
 		cleanedParts.push(remainder);
 	}
 	if (formulas.length === 0) return { formulas: [], cleanedQuery: query };
