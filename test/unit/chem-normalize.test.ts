@@ -180,6 +180,15 @@ describe("extractQueryFormulas — F2 chem query routing", () => {
 		expect(Date.now() - start).toBeLessThan(5000);
 	});
 
+	it("ReDoS guard: a moderate 20-digit run stays linear (lookbehind kill-test)", () => {
+		// 20 digits bypasses the 25-digit pre-guard, so this input reaches MOLECULAR_RE: with the
+		// lookbehind partition removed, the digit alternation backtracks exponentially and this
+		// test hangs past the wall-clock bound instead of failing fast.
+		const start = Date.now();
+		expect(isMolecularFormula(`H${"2".repeat(20)}z`)).toBe(false);
+		expect(Date.now() - start).toBeLessThan(5000);
+	});
+
 	it("25+ digit-run guard fires before MOLECULAR_RE (dead-guard regression)", () => {
 		// Direct guard-level proof: MOLECULAR_RE alone would ACCEPT CO·<30 digits> (hydrate-dot
 		// digit run is a valid CORE_ATOM), so only the digit-run guard can reject it.

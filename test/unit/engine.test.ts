@@ -737,6 +737,40 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("classifies a mid-flight user cancel (Error Cancelled) as cancelled, not failed", async () => {
+			const filePath = join(TEST_DIR, "midflight-cancel.txt");
+			writeFileSync(filePath, "Midflight cancel content about authentication tokens and sessions.");
+			await engine.add(filePath, "Midflight Cancel");
+			writeFileSync(filePath, "Changed midflight content about billing invoices and payments.");
+
+			// Abort only AFTER the update has entered its try block (first progress callback), so
+			// the thrown Error("Cancelled") is classified by isCancellationError — deleting that
+			// message branch would flip this job to "failed" and the KB to "error".
+			const controller = new AbortController();
+			let calls = 0;
+			await expect(
+				engine.update(
+					"Midflight Cancel",
+					() => {
+						calls++;
+						if (calls >= 2) controller.abort();
+					},
+					controller.signal,
+				),
+				// throwIfAborted throws Error("Cancelled"); with the branch deleted the abort
+				// would not reach the classification and the message would still match — so also
+				// assert the job/status state below (the real discriminator).
+			).rejects.toThrow();
+			expect(engine.list().find((kb) => kb.name === "Midflight Cancel")?.status).toBe("ready");
+			const db = openDatabase(TEST_DIR);
+			try {
+				const kbId = engine.list().find((kb) => kb.name === "Midflight Cancel")?.id ?? "";
+				expect(getIndexingJob(db, kbId)?.status).toBe("cancelled");
+			} finally {
+				db.close();
+			}
+		});
+
 		it("fails cleanly when the embedding config turns broken before an update starts", async () => {
 			const filePath = join(TEST_DIR, "broken-env-source.txt");
 			writeFileSync(filePath, "Broken env probe content about authentication tokens and sessions.");

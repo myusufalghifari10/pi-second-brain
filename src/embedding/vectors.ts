@@ -22,7 +22,12 @@ export function openVectorWriter(path: string): VectorWriter {
 	let dim = 0;
 	let closed = false;
 	let byteOffset = 8;
-	writeSync(fd, Buffer.alloc(8), 0, 8, 0);
+	try {
+		writeSync(fd, Buffer.alloc(8), 0, 8, 0);
+	} catch (error) {
+		closeSync(fd); // a failed placeholder write must not leak the descriptor
+		throw error;
+	}
 
 	function writeHeader(): void {
 		const header = Buffer.alloc(8);

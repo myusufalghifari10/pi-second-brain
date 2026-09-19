@@ -26,10 +26,12 @@ function scheduleUpdate(
 					// stored pre-change snapshot keeps the poller re-detecting, so a change whose
 					// update was rejected (overlapping mutation) or coalesced into a stale in-flight
 					// run is re-triggered instead of being silently lost. On rejection the snapshot
-					// stays untouched and the next poll retries.
-					snapshots.set(kbId, scanSnapshot(dirPath, options));
+					// stays untouched and the next poll retries. Skip re-adding when the watcher was
+					// stopped mid-flight (remove/clear/dispose) — a dead KB must not regain state.
+					if (watchers.has(kbId) || pollers.has(kbId)) snapshots.set(kbId, scanSnapshot(dirPath, options));
 				},
 				() => {}, // rejection: keep the pre-change snapshot so the next poll re-detects
+				// (the finally-style snapshot store above only applies to a still-attached watcher)
 			);
 		}, DEBOUNCE_MS),
 	);
