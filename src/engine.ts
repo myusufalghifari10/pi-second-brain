@@ -302,10 +302,11 @@ export interface IndexPlan {
 function isCancellationError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (error.message === "Cancelled") return true;
-	// User-cancel must restore the prior kb status even when the abort surfaces from a lower
-	// layer: fetch rejects with AbortError and the PDF sidecar rethrows an "aborted" failure.
 	if (error.name === "AbortError") return true;
-	return error.message.toLowerCase().includes("abort");
+	// Structured sidecar check only: a crashed adapter's stderr may coincidentally contain the
+	// word "abort" (Python tracebacks routinely do) — misclassifying that as a user cancel
+	// would skip the fail-open unpdf fallback and mask a real failure as a cancelled job.
+	return error instanceof SidecarError && error.failure === "aborted";
 }
 
 function tempVectorPath(vectorPath: string): string {
@@ -1321,9 +1322,9 @@ export class KnowledgeEngine {
 		});
 		updateKBStatus(db, kb.id, "indexing");
 		startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
-		// Layer 3 (spec §3.3): the add path ensures the (fresh) kb's formula flag up front; the
-		// per-batch writes below keep formula rows in sync with every inserted chunk.
-		this.ensureFormulaIndexesBuilt([kb.id]);
+		// Layer 3 (spec §3.3): the formula flag is stamped only AFTER all rows are written (end of
+		// the success path, beside the label graph) — an interrupted add leaves flag=0 so the
+		// first math query backfills/repairs instead of being disabled forever.
 
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
@@ -1518,7 +1519,9 @@ export class KnowledgeEngine {
 				skipped_total: latestSkippedTotal,
 				added_chunks: chunkCount,
 			});
-			// Layer 4 (spec §3.5): build the label graph once the KB's complete file set exists.
+			// Layer 3 (spec §3.3) + Layer 4 (spec §3.5): the KB's complete file set exists — stamp
+			// the formula index built (rows were written per batch above) and build the label graph.
+			markFormulaIndexBuilt(this.db, kb.id);
 			this.ensureLabelGraphsBuilt([kb.id]);
 			finishIndexingJob(this.db, kb.id, "succeeded", readyMessage);
 			onProgress?.(readyMessage);
@@ -1996,7 +1999,8 @@ export class KnowledgeEngine {
 		}
 		const db = this.db;
 		const { mode = "hybrid", kb_id, filters, diversity = "balanced" } = options;
-		const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+		const rawOffset = options.offset ?? 0;
+		const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const queryTokens = tokenizeForSimilarity(query);
@@ -2033,6 +2037,7 @@ export class KnowledgeEngine {
 				results: [],
 				total_count: 0,
 				has_more: false,
+				suggestions: EMPTY_RESULT_SUGGESTIONS,
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
 				tuning: tuningSummary,
@@ -2559,7 +2564,7 @@ export class KnowledgeEngine {
 				};
 			}),
 			total_count: total,
-			has_more: symbols.length > limit,
+			has_more: offset + page.length < total,
 		};
 	}
 
@@ -2883,6 +2888,9 @@ export class KnowledgeEngine {
 			} catch {
 				// fail-open: retrying is intentionally skipped for this process
 			}
+			// Formula rows were written per inserted batch; stamp the index built so the first
+			// math query skips a redundant full-KB backfill (parity with the add path stamp).
+			markFormulaIndexBuilt(this.db, kb.id);
 			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${inserted} chunks`);
 			return { kb: savedKB, chunkCount: inserted };
 		} catch (error) {
@@ -2915,6 +2923,7 @@ export class KnowledgeEngine {
 		if (disposeModels) {
 			await disposeEmbedding();
 			await disposeReranker();
+			shutdownModelWorker();
 		} else {
 			await prepareEmbeddingForShutdown();
 			await prepareRerankerForShutdown();

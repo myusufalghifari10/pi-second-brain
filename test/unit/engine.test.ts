@@ -1,4 +1,5 @@
 import {
+	copyFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -10,18 +11,29 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
 import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
+import { SidecarError } from "../../src/indexer/pdf-sidecar.ts";
 import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
 const mammothMock = vi.hoisted(() => ({
 	extractRawText: vi.fn(),
 }));
 
+const FIXTURE_PDF = fileURLToPath(new URL("../fixtures/fixture-paper.pdf", import.meta.url));
+
+const convertPdfMock = vi.hoisted(() => vi.fn());
+
 vi.mock("mammoth", () => ({
 	extractRawText: mammothMock.extractRawText,
 }));
+
+vi.mock("../../src/indexer/pdf-sidecar.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/indexer/pdf-sidecar.ts")>();
+	return { ...actual, convertPdf: convertPdfMock };
+});
 
 let TEST_DIR: string;
 
@@ -595,6 +607,33 @@ describe("KnowledgeEngine", () => {
 				const job = getIndexingJob(db, kbId);
 				expect(job?.status).toBe("cancelled");
 				expect(job?.error_message).toContain("aborted");
+			} finally {
+				db.close();
+			}
+		});
+
+		it("keeps sidecar failures with 'abort' in stderr classified as failures, not user cancels", async () => {
+			// Real parseable PDF: the mocked sidecar fails, the unpdf fallback must succeed.
+			const filePath = join(TEST_DIR, "sidecrash-about-authentication.pdf");
+			copyFileSync(FIXTURE_PDF, filePath);
+			// A crashed adapter whose stderr tail happens to contain the word "abort" is a REAL
+			// failure: it must fall open (skip + pdf_sidecar_failed), never be treated as a user
+			// cancel (which would have failed the add and recorded a cancelled job).
+			convertPdfMock.mockImplementationOnce(async () => {
+				throw new SidecarError(
+					"nonzero_exit",
+					"sidecar failed (exit 1): Traceback (most recent call last): ... RuntimeError: abort in worker pool",
+				);
+			});
+
+			await engine.add(filePath, "Sidecrash PDF");
+			const kb = engine.list().find((candidate) => candidate.name === "Sidecrash PDF");
+			expect(kb?.status).toBe("ready");
+			expect(kb?.chunk_count).toBeGreaterThan(0);
+			const db = openDatabase(TEST_DIR);
+			try {
+				const job = getIndexingJob(db, kb?.id ?? "");
+				expect(job?.status).not.toBe("cancelled");
 			} finally {
 				db.close();
 			}

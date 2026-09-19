@@ -701,6 +701,7 @@ function assembleChunkBlocks(
 // a `# comment` inside an open fence must not split the section nor enter headingStack.
 const MD_FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})/;
 const MD_BACKTICK_CLOSE_RE = /^\s*`{3,}\s*$/;
+const DISPLAY_MATH_CLOSE_RE = /\$\$|\\\]/;
 const MD_TILDE_CLOSE_RE = /^\s*~{3,}\s*$/;
 
 export function chunkMarkdown(
@@ -754,8 +755,14 @@ export function chunkMarkdown(
 	}
 
 	let openFence: "`" | "~" | undefined;
+	let openDisplayMath = false;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
+		if (openDisplayMath) {
+			if (DISPLAY_MATH_CLOSE_RE.test(line)) openDisplayMath = false;
+			sectionLines.push(line);
+			continue;
+		}
 		if (openFence !== undefined) {
 			const closeRe = openFence === "`" ? MD_BACKTICK_CLOSE_RE : MD_TILDE_CLOSE_RE;
 			if (closeRe.test(line)) openFence = undefined;
@@ -765,6 +772,19 @@ export function chunkMarkdown(
 		const fenceOpen = MD_FENCE_OPEN_RE.exec(line);
 		if (fenceOpen) {
 			openFence = fenceOpen[1]?.startsWith("`") ? "`" : "~";
+			sectionLines.push(line);
+			continue;
+		}
+		// Display math is a protected atomic unit: a `#`-leading line inside a `$$ … $$` block or
+		// `\[ … \]` must not split the section (same bug class as fenced code). Open only when
+		// the `$$` delimiter count on the line is odd (unterminated), so `$$x$$` stays inline.
+		if ((line.match(/\$\$/g) ?? []).length % 2 === 1) {
+			openDisplayMath = true;
+			sectionLines.push(line);
+			continue;
+		}
+		if (line.includes("\\[") && !line.includes("\\]")) {
+			openDisplayMath = true;
 			sectionLines.push(line);
 			continue;
 		}

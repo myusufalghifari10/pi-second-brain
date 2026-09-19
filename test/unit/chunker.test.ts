@@ -605,6 +605,35 @@ describe("chunkMarkdown fence-aware headings", () => {
 		expect(chunks[0].content).toContain("# not a heading inside a tilde fence");
 		expect(chunks[1].content).not.toContain("~~~");
 	});
+
+	it("ignores hash-heading lines inside display math ($$ blocks and \\[..\\])", () => {
+		const md = [
+			"## Theory",
+			"",
+			"Opening paragraph that is long enough to pass the fifty character minimum threshold here.",
+			"$$",
+			"# \\text{this line starts with hash inside display math}",
+			"E = mc^2 \\tag{1}",
+			"$$",
+			"Middle paragraph that is likewise long enough to pass the minimum chunk threshold.",
+			"\\[",
+			"# bracket-comment inside bracketed display math",
+			"\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}",
+			"\\]",
+			"Closing paragraph that is once again long enough to pass the minimum chunk threshold.",
+			"## Later",
+			"",
+			"Final section paragraph that is long enough to pass the fifty character threshold.",
+		].join("\n");
+		const chunks = chunkMarkdown(md, "mathfence.md");
+		// Only ## Theory and ## Later are real headings; the two hash lines inside math stay put.
+		expect(chunks).toHaveLength(2);
+		expect(JSON.parse(chunks[0].metadata_json).breadcrumb).toBe("Theory");
+		expect(JSON.parse(chunks[1].metadata_json).breadcrumb).toBe("Later");
+		// Display math stays atomic (open + body + close in one chunk).
+		expect(chunks[0].content).toContain("$$\n# \\text{this line starts with hash inside display math}\nE = mc^2");
+		expect(chunks[0].content).toContain("\\int_0^\\infty");
+	});
 });
 
 describe("chunker line coordinates", () => {
