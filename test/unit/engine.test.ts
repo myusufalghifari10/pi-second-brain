@@ -570,6 +570,17 @@ describe("KnowledgeEngine", () => {
 			expect(nan.warnings?.some((w) => w.includes("offset capped")) ?? false).toBe(false);
 		});
 
+		it("flags and refuses an oversized single-file document", async () => {
+			// Cap applies to PDF/DOCX too (the r14 fix covered text only): directory scans already
+			// skip oversized files, so single-file ingestion must not become the OOM loophole.
+			const bigPdf = join(TEST_DIR, "big.pdf");
+			writeFileSync(bigPdf, Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(10 * 1024 * 1024 + 1)]));
+
+			const plan = engine.plan(bigPdf);
+			expect(plan.summary).toContain("exceeds the 10 MB single-file cap");
+			await expect(engine.add(bigPdf, "Big Pdf")).rejects.toThrow(/ingestion cap/);
+		});
+
 		it("blocks remove and clear while update is in flight", async () => {
 			const sourcePath = join(TEST_DIR, "update-guard.txt");
 			writeFileSync(sourcePath, "Initial update guard content about authentication tokens.");

@@ -66,7 +66,23 @@ function validateNodeExecPath(candidate: string): string {
 	if (major === null || major < MIN_NODE_MAJOR) {
 		throw new Error(`Node ${MIN_NODE_MAJOR}+ is required for the model worker; ${candidate} reported ${version}`);
 	}
+	assertSourceWorkerVersionSupport(version, candidate);
 	return candidate;
+}
+
+// Source-mode workers are launched with --experimental-strip-types, which shipped in Node
+// 22.6.0: accepting 22.0-22.5 here would spawn a worker that dies instantly with "bad option".
+// Packaged .js runs pass execArgv: [] and keep the plain 22+ floor.
+function assertSourceWorkerVersionSupport(version: string, label: string): void {
+	if (getWorkerExecArgv().length === 0) return;
+	const major = parseNodeMajor(version);
+	const minorMatch = /^v\d+\.(\d+)/.exec(version);
+	const minor = minorMatch ? Number(minorMatch[1]) : -1;
+	if (major === MIN_NODE_MAJOR && minor < 6) {
+		throw new Error(
+			`Node 22.6+ is required to run the model worker from TypeScript sources (--experimental-strip-types); ${label} reported ${version}. Set PI_KNOWLEDGE_NODE_PATH to a Node 22.6+ binary or use a packaged .js build.`,
+		);
+	}
 }
 
 function normalizeExecutableCandidate(value: string): string {
@@ -164,6 +180,7 @@ function getNodeExecPath(): string {
 	if (currentProcessLooksLikeNode) {
 		const major = parseNodeMajor(process.version);
 		if (major !== null && major >= MIN_NODE_MAJOR) {
+			assertSourceWorkerVersionSupport(process.version, process.execPath);
 			resolvedNodeExecPath = process.execPath;
 			return resolvedNodeExecPath;
 		}
@@ -373,6 +390,19 @@ class StdioModelWorkerTransport extends ModelWorkerTransport {
 			throw new Error("Model worker stdio pipes are unavailable");
 		}
 		child.stdout.on("data", (chunk: Buffer) => this.handleStdoutChunk(chunk));
+		// Stream-level 'error' listeners are mandatory: a write EPIPE (worker died mid-flush) is
+		// delivered to the write callback AND then emitted as 'error' on the stream itself. With
+		// no listener the unhandled event crashes the HOST process instead of degrading to the
+		// exit-handler path (formatted exit error + pending-request rejection).
+		child.stdin.on("error", () => {
+			/* handled by the writeRequest callback + ChildProcess exit/error handlers */
+		});
+		child.stdout.on("error", () => {
+			/* read-side failures are owned by the exit handler */
+		});
+		child.stderr?.on("error", () => {
+			/* stderr capture is diagnostic-only */
+		});
 	}
 
 	protected isTransportConnected(): boolean {

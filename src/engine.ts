@@ -863,6 +863,15 @@ async function extractSourceFileContent(
 	skipped?: ReturnType<typeof createSkippedScanStats>,
 ): Promise<ExtractedSourceFile> {
 	const lowerPath = filePath.toLowerCase();
+	throwIfAborted(signal);
+	// Byte cap for EVERY single-file read (text, PDF, DOCX) — aligned with the directory
+	// scanner's per-file skip and the URL streaming cap: a multi-GB file must fail loudly
+	// instead of being loaded fully into memory.
+	if (statSync(filePath).size > MAX_SOURCE_FILE_SIZE) {
+		throw new Error(
+			`File exceeds the ${Math.round(MAX_SOURCE_FILE_SIZE / (1024 * 1024))} MB ingestion cap: ${filePath} — split it or add its directory instead`,
+		);
+	}
 	if (lowerPath.endsWith(".pdf")) {
 		return extractPdfSourceFileContent(filePath, signal, skipped);
 	}
@@ -879,13 +888,6 @@ async function extractSourceFileContent(
 		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
 	}
 	throwIfAborted(signal);
-	// Same byte cap as the directory scanner and the URL path: a multi-GB single file must fail
-	// loudly instead of being read fully into memory.
-	if (statSync(filePath).size > MAX_SOURCE_FILE_SIZE) {
-		throw new Error(
-			`File exceeds the ${Math.round(MAX_SOURCE_FILE_SIZE / (1024 * 1024))} MB ingestion cap: ${filePath} — split it or add its directory instead`,
-		);
-	}
 	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
 }
 
@@ -1309,12 +1311,15 @@ export class KnowledgeEngine {
 				};
 			}
 			const size = statSync(resolvedSource).size;
+			const oversized = size > MAX_SOURCE_FILE_SIZE;
 			return {
 				source_type: "file",
 				scannable_files: 1,
 				scannable_bytes: size,
 				skipped,
-				summary: `File plan: 1 scannable file, ${formatBytes(size)} source size`,
+				summary: oversized
+					? `File plan: 1 scannable file, ${formatBytes(size)} source size — exceeds the ${Math.round(MAX_SOURCE_FILE_SIZE / (1024 * 1024))} MB single-file cap; ingestion will fail`
+					: `File plan: 1 scannable file, ${formatBytes(size)} source size`,
 			};
 		}
 		const skipped = createSkippedScanStats();

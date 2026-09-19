@@ -221,6 +221,32 @@ describe("model worker client", () => {
 		await expect(request).resolves.toEqual([{ chunkId: "chunk-1", score: 0.9 }]);
 	});
 
+	it("survives a stdin EPIPE while a request is in flight instead of crashing the host", async () => {
+		const stdioChild = createFakeChild({ ipc: false, stdio: true });
+		childProcessMock.fork.mockReturnValue(createFakeChild({ ipc: false }));
+		childProcessMock.spawn.mockReturnValue(stdioChild);
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = embedInModelWorker(["hello"], "passage");
+		// Worker dies mid-flush: the queued write surfaces EPIPE on the stream itself. Without
+		// the stream-level error listeners this emit is an unhandled 'error' event that would
+		// crash the host process; with them the request rejects via the exit handler.
+		stdioChild.stdin?.emit("error", new Error("write EPIPE"));
+		stdioChild.emit("exit", 1, null);
+
+		await expect(request).rejects.toThrow(/exited before responding|EPIPE|not writable/);
+	});
+
+	it("rejects Node 22.0-22.5 for source-mode workers (strip-types needs 22.6+)", async () => {
+		childProcessMock.execFileSync.mockReturnValue("v22.4.0\n");
+		vi.stubEnv("PI_KNOWLEDGE_NODE_PATH", "/usr/bin/node-fake");
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		await expect(embedInModelWorker(["hello"], "passage")).rejects.toThrow(/22\.6\+/);
+		expect(childProcessMock.fork).not.toHaveBeenCalled();
+		expect(childProcessMock.spawn).not.toHaveBeenCalled();
+	});
+
 	it("falls back to stdio transport when fork does not expose child.send", async () => {
 		const forkChild = createFakeChild({ ipc: false });
 		const stdioChild = createFakeChild({ ipc: false, stdio: true });
