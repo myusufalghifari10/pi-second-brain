@@ -71,4 +71,41 @@ describe("file watcher exclusions", () => {
 		// The rejected attempt must NOT consume the change: the poller re-fires and succeeds.
 		expect(updates).toEqual(["kb"]);
 	});
+
+	it("re-detects a change that landed while a successful update was still in flight", async () => {
+		// The HIGH-loss class: change B arrives DURING update U1 (whose scan predates B). Overlap
+		// attempts reject for as long as U1 runs; when U1 settles, the settle path must NOT store
+		// a post-run scan (it includes B) — the poller must re-detect B and a clean update must
+		// index it, and only then does the snapshot advance.
+		const deferreds: Array<{ resolve: () => void }> = [];
+		let calls = 0;
+		let u1Settled = false;
+		startWatcher("kb", testDir, () => {
+			calls++;
+			if (calls === 1) return new Promise<void>((resolve) => deferreds.push({ resolve })); // U1 in flight
+			return u1Settled ? Promise.resolve() : Promise.reject(new Error('An update for "kb" is already running'));
+		});
+
+		writeFileSync(join(testDir, "a.ts"), "export const A = 1;");
+		await vi.advanceTimersByTimeAsync(2_500); // check detects A → schedules update
+		await vi.advanceTimersByTimeAsync(2_500); // U1 starts (deferred, in flight)
+		expect(calls).toBe(1);
+
+		writeFileSync(join(testDir, "b.ts"), "export const B = 2;");
+		await vi.advanceTimersByTimeAsync(5_000); // overlap attempts fire while U1 runs → REJECT
+		const callsAfterBAdvance = calls; // U1 + however many overlap attempts were rejected in-flight
+		expect(callsAfterBAdvance).toBeGreaterThanOrEqual(2);
+
+		deferreds[0]?.resolve(); // U1 settles successfully — must NOT consume B
+		u1Settled = true; // subsequent scheduled updates run clean and store their post-run scan
+		await vi.advanceTimersByTimeAsync(0); // flush settle microtasks
+		await vi.advanceTimersByTimeAsync(5_000); // poller re-detects B → clean update runs
+		// The HIGH-loss discriminator: a clean update MUST fire after U1 settles. Had the settle
+		// path wrongly stored its post-run scan (which includes B), no further update would run
+		// and B would stay unindexed forever.
+		expect(calls).toBeGreaterThan(callsAfterBAdvance);
+		const before = calls;
+		await vi.advanceTimersByTimeAsync(10_000); // fully quiet afterwards: no retry loop
+		expect(calls).toBe(before);
+	});
 });

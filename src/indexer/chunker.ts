@@ -275,7 +275,12 @@ function buildIgnoreMatcher(dirPath: string): ReturnType<typeof ignore> {
 
 	const gitignorePath = join(dirPath, ".gitignore");
 	if (existsSync(gitignorePath)) {
-		ig.add(readFileSync(gitignorePath, "utf-8"));
+		try {
+			ig.add(readFileSync(gitignorePath, "utf-8"));
+		} catch {
+			// .gitignore vanished between existsSync and read (git checkout/clean race): proceed
+			// with the defaults only instead of throwing inside an unguarded scan path.
+		}
 	}
 
 	return ig;

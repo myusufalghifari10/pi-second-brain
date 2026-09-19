@@ -1605,11 +1605,12 @@ export class KnowledgeEngine {
 
 		const activeUpdate = this.activeUpdates.get(updateableKB.id);
 		if (activeUpdate) {
-			// Overlapping same-KB updates must FAIL LOUDLY, not coalesce. A coalesced caller used to
-			// receive the in-flight update's promise whose file scan predates its own trigger — the
-			// watcher then treated the stale result as "change indexed" and lost it permanently.
-			// Rejecting keeps every consumer honest: the watcher retries after the in-flight run
-			// settles, and a human caller gets a truthful error instead of borrowed counters.
+			// Overlapping same-KB updates must FAIL LOUDLY, not coalesce. A coalesced caller would
+			// receive the in-flight update's promise whose file scan predates its own trigger.
+			// Contract: the watcher records the rejection as a pending retry and re-runs AFTER the
+			// in-flight update settles (the settle path then must not consume the disk state the
+			// rejected run never indexed); a human caller gets a truthful error instead of borrowed
+			// counters. Dispose still waits for the active update before closing the DB.
 			throw new Error(`An update for "${updateableKB.name}" is already running; retry after it finishes.`);
 		}
 

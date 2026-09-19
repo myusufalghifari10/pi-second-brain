@@ -6,6 +6,10 @@ const pollers = new Map<string, ReturnType<typeof setInterval>>();
 const snapshots = new Map<string, Map<string, string>>();
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const checkTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// KBs whose scheduled update was rejected (overlapping in-flight run): the rejected caller
+// indexed nothing, so when the in-flight run settles successfully its post-run scan must NOT
+// be stored — the pending retry has to re-detect those changes against the old snapshot.
+const pendingRetry = new Set<string>();
 const DEBOUNCE_MS = 2000;
 const POLL_MS = 2000;
 
@@ -22,16 +26,23 @@ function scheduleUpdate(
 			debounceTimers.delete(kbId);
 			void Promise.resolve(onUpdate(kbId)).then(
 				() => {
-					// Advance the stored snapshot ONLY after a successful update. While it runs, the
-					// stored pre-change snapshot keeps the poller re-detecting, so a change whose
-					// update was rejected (overlapping mutation) or coalesced into a stale in-flight
-					// run is re-triggered instead of being silently lost. On rejection the snapshot
-					// stays untouched and the next poll retries. Skip re-adding when the watcher was
-					// stopped mid-flight (remove/clear/dispose) — a dead KB must not regain state.
-					if (watchers.has(kbId) || pollers.has(kbId)) snapshots.set(kbId, scanSnapshot(dirPath, options));
+					// A rejected overlap during this run means the run's file scan predates changes
+					// that arrived mid-flight: storing the fresh post-run scan would consume changes
+					// the run never indexed. Skip the store; the poller re-detects against the old
+					// snapshot and a clean update converges (then stores its own fresh snapshot).
+					if (pendingRetry.delete(kbId)) return;
+					// Skip re-adding when the watcher was stopped mid-flight (remove/clear/dispose)
+					// — a dead KB must not regain state.
+					if (watchers.has(kbId) || pollers.has(kbId)) {
+						const fresh = scanSnapshot(dirPath, options);
+						if (fresh) snapshots.set(kbId, fresh); // null scan → next poll re-checks
+					}
 				},
-				() => {}, // rejection: keep the pre-change snapshot so the next poll re-detects
-				// (the finally-style snapshot store above only applies to a still-attached watcher)
+				() => {
+					// Rejection: the overlapping caller indexed nothing. Request a retry once the
+					// in-flight run settles, and keep the pre-change snapshot so the poller re-detects.
+					pendingRetry.add(kbId);
+				},
 			);
 		}, DEBOUNCE_MS),
 	);
@@ -45,7 +56,10 @@ function checkForChanges(
 ): void {
 	const previous = snapshots.get(kbId) ?? new Map<string, string>();
 	const next = scanSnapshot(dirPath, options);
-	if (!snapshotsDiffer(previous, next)) return;
+	// A null scan means the scan itself failed (transient FS race): treat the tick as "no change
+	// detected" — keep the previous snapshot and try again on the next poll. Never throw here:
+	// this runs inside timer callbacks where an exception would crash the host process.
+	if (next === null || !snapshotsDiffer(previous, next)) return;
 	// Deliberately NOT storing `next` here: scheduleUpdate stores the fresh snapshot after the
 	// update settles. Storing it now would consume the change event even if the triggered update
 	// never scans it (rejected, or coalesced into a run whose scan predates the change).
@@ -67,17 +81,23 @@ function scheduleCheck(kbId: string, dirPath: string, options: ScanOptions, onUp
 	);
 }
 
-function scanSnapshot(dirPath: string, options: ScanOptions = {}): Map<string, string> {
+function scanSnapshot(dirPath: string, options: ScanOptions = {}): Map<string, string> | null {
 	const snapshot = new Map<string, string>();
 	if (!existsSync(dirPath)) return snapshot;
 	const skipped = createSkippedScanStats();
-	for (const file of iterateScannableFiles(dirPath, skipped, options)) {
-		try {
-			const stat = statSync(file.path);
-			snapshot.set(file.path, `${stat.mtimeMs}:${stat.size}`);
-		} catch {
-			/* file disappeared or is unreadable */
+	try {
+		for (const file of iterateScannableFiles(dirPath, skipped, options)) {
+			try {
+				const stat = statSync(file.path);
+				snapshot.set(file.path, `${stat.mtimeMs}:${stat.size}`);
+			} catch {
+				/* file disappeared or is unreadable */
+			}
 		}
+	} catch {
+		// Scan-level failure (e.g. ignore-file race inside iterateScannableFiles): report null so
+		// callers fail open ("no change this tick") instead of throwing from a timer callback.
+		return null;
 	}
 	return snapshot;
 }
@@ -96,7 +116,7 @@ function startPoller(
 	onUpdate: (kbId: string) => unknown,
 	options: ScanOptions = {},
 ): void {
-	snapshots.set(kbId, scanSnapshot(dirPath, options));
+	snapshots.set(kbId, scanSnapshot(dirPath, options) ?? new Map<string, string>());
 	pollers.set(
 		kbId,
 		setInterval(() => {
@@ -118,8 +138,10 @@ export function startWatcher(
 			scheduleCheck(kbId, dirPath, options, onUpdate);
 		});
 		watcher.on("error", () => {
-			watchers.get(kbId)?.close();
-			watchers.delete(kbId);
+			// Close OUR instance, not whatever currently occupies the kbId slot: a queued error from
+			// an old watcher must not tear down its replacement after a same-kbId restart.
+			watcher.close();
+			if (watchers.get(kbId) === watcher) watchers.delete(kbId);
 		});
 		watchers.set(kbId, watcher);
 	} catch {
@@ -136,6 +158,7 @@ export function stopWatcher(kbId: string): void {
 		pollers.delete(kbId);
 	}
 	snapshots.delete(kbId);
+	pendingRetry.delete(kbId);
 	const t = debounceTimers.get(kbId);
 	if (t) {
 		clearTimeout(t);
