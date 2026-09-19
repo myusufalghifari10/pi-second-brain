@@ -834,8 +834,12 @@ export default function (pi: ExtensionAPI) {
 			if (_signal?.aborted) throw new Error("Cancelled");
 			const { target, confirm } = params as { target: string; confirm?: boolean };
 			if (confirm !== true) throw new Error("Confirmation required: pass confirm=true for destructive removal");
-			const { engine } = await ensureInitialized();
+			const { engine, watcher } = await ensureInitialized();
+			// Resolve the KB id BEFORE removal so the directory watcher/poller can be stopped too —
+			// a leaked watcher would keep scanning a deleted tree and error-loop forever.
+			const kbId = engine.list().find((kb) => kb.name === target || kb.id === target)?.id;
 			const ok = engine.remove(target);
+			if (ok && kbId) watcher.stopWatcher(kbId);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
 		},
 	});
@@ -900,8 +904,9 @@ export default function (pi: ExtensionAPI) {
 			if ((params as { confirm?: boolean }).confirm !== true) {
 				throw new Error("Confirmation required: pass confirm=true for destructive clear");
 			}
-			const { engine } = await ensureInitialized();
+			const { engine, watcher } = await ensureInitialized();
 			engine.clear();
+			watcher.stopAllWatchers();
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
 		},
 	});

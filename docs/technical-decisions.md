@@ -61,9 +61,9 @@
 
 **背景**: zh-TW + 英文混合環境。
 
-**決策**: 預設 multilingual-e5-small quantized (32 MB)。
+**決策**: 預設 multilingual-e5-small，以 fp32 `model.onnx` 載入（約 118 MB）。
 
-**理由**: 同 384d、中文品質好、quantized 損失 <2% for 高資源語言。
+**理由**: 同 384d、中文品質好。載入精度凍結在 fp32（`quantized` 參數不被 transformers 讀取，已移除）；精度不會在執行時切換，也不納入 `embeddingSignature`。
 
 ---
 
@@ -361,7 +361,7 @@
 - `canonicalizeMathText()` (unicode map + caret rule + sup/sub folds) is applied AFTER the existing `preTokenizeForFTS` chain (canonicalize-last); the chain itself is untouched line-for-line.
 - Superscript/subscript unicode folds into plain alphanumeric composite tokens such as `pow2` and `sub1`; the `+`/`-`/`=` forms use letter suffixes (`powplus`, `powminus`, `poweq`) rather than punctuation-bearing forms like `pow+`.
 - ASCII `_` is never transformed (only `^` has a marker rule); ASCII `a_1` and unicode `a₁` remain asymmetric — a known and accepted limitation.
-- Single-letter variables (`x`, `y`) are dropped on both index and query sides by the existing `length > 1` filter; cross-notation matching is carried by the `pow2`/`sub…` composite tokens.
+- Query-side tokenization drops single-letter tokens via the `length > 1` filter; single-letter tokens may remain in the index (no index-side filter) but are never queryable. Cross-notation matching is carried by the `pow2`/`sub…` composite tokens.
 
 **Rationale**:
 - canonicalize-last is load-bearing: if canonicalization ran first, `x²` → `x pow2` would be torn apart by the chain's letter-digit split into `pow 2`, `2` would be dropped by the length filter, the FTS term would be just `pow`, and the whole cross-notation mechanism would silently die.

@@ -5,6 +5,7 @@ const watchers = new Map<string, FSWatcher>();
 const pollers = new Map<string, ReturnType<typeof setInterval>>();
 const snapshots = new Map<string, Map<string, string>>();
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const checkTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 2000;
 const POLL_MS = 2000;
 
@@ -16,6 +17,29 @@ function scheduleUpdate(kbId: string, onUpdate: (kbId: string) => void): void {
 		setTimeout(() => {
 			debounceTimers.delete(kbId);
 			onUpdate(kbId);
+		}, DEBOUNCE_MS),
+	);
+}
+
+function checkForChanges(kbId: string, dirPath: string, options: ScanOptions, onUpdate: (kbId: string) => void): void {
+	const previous = snapshots.get(kbId) ?? new Map<string, string>();
+	const next = scanSnapshot(dirPath, options);
+	if (!snapshotsDiffer(previous, next)) return;
+	snapshots.set(kbId, next);
+	scheduleUpdate(kbId, onUpdate);
+}
+
+// Native FS events can storm (git checkout, npm install, build output). The expensive part is
+// scanSnapshot (readdir + stat per file), so it must run at most once per quiet DEBOUNCE_MS
+// window — schedule the CHECK, do the scan inside the timer.
+function scheduleCheck(kbId: string, dirPath: string, options: ScanOptions, onUpdate: (kbId: string) => void): void {
+	const existing = checkTimers.get(kbId);
+	if (existing) clearTimeout(existing);
+	checkTimers.set(
+		kbId,
+		setTimeout(() => {
+			checkTimers.delete(kbId);
+			checkForChanges(kbId, dirPath, options, onUpdate);
 		}, DEBOUNCE_MS),
 	);
 }
@@ -48,12 +72,7 @@ function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => 
 	pollers.set(
 		kbId,
 		setInterval(() => {
-			const previous = snapshots.get(kbId) ?? new Map<string, string>();
-			const next = scanSnapshot(dirPath, options);
-			if (snapshotsDiffer(previous, next)) {
-				snapshots.set(kbId, next);
-				scheduleUpdate(kbId, onUpdate);
-			}
+			checkForChanges(kbId, dirPath, options, onUpdate);
 		}, POLL_MS),
 	);
 }
@@ -68,11 +87,7 @@ export function startWatcher(
 	startPoller(kbId, dirPath, onUpdate, options);
 	try {
 		const watcher = watch(dirPath, { recursive: true }, () => {
-			const previous = snapshots.get(kbId) ?? new Map<string, string>();
-			const next = scanSnapshot(dirPath, options);
-			if (!snapshotsDiffer(previous, next)) return;
-			snapshots.set(kbId, next);
-			scheduleUpdate(kbId, onUpdate);
+			scheduleCheck(kbId, dirPath, options, onUpdate);
 		});
 		watcher.on("error", () => {
 			watchers.get(kbId)?.close();
@@ -97,6 +112,11 @@ export function stopWatcher(kbId: string): void {
 	if (t) {
 		clearTimeout(t);
 		debounceTimers.delete(kbId);
+	}
+	const c = checkTimers.get(kbId);
+	if (c) {
+		clearTimeout(c);
+		checkTimers.delete(kbId);
 	}
 }
 

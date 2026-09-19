@@ -363,7 +363,7 @@ Environment overrides:
 | `PI_KNOWLEDGE_EMBEDDING` | provider:model | `local:multilingual-e5-small` |
 | `PI_KNOWLEDGE_WATCH` | Enable file watchers | `false` |
 | `PI_KNOWLEDGE_AUTO_INJECT` | Auto-inject per turn | `false` |
-| `PI_KNOWLEDGE_RERANK` | Enable cross-encoder | `false` |
+| `PI_KNOWLEDGE_RERANK` | Enable cross-encoder *(historical — superseded by `PI_KNOWLEDGE_RERANKER`, not read by current code)* | `false` |
 
 ---
 

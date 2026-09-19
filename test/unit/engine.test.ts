@@ -563,11 +563,28 @@ describe("KnowledgeEngine", () => {
 			await updateRun;
 		});
 
+		it("refuses to wipe a directory KB whose source scan yields zero readable files", async () => {
+			const dirPath = join(TEST_DIR, "guarded-dir");
+			mkdirSync(dirPath);
+			writeFileSync(join(dirPath, "note.txt"), "Guarded directory content about authentication tokens and sessions.");
+			await engine.add(dirPath, "Guarded Dir");
+			const chunkCountBefore = engine.list().find((kb) => kb.name === "Guarded Dir")?.chunk_count ?? 0;
+			expect(chunkCountBefore).toBeGreaterThan(0);
+
+			// Emulate a broken mount / emptied directory: the path exists but yields no files.
+			rmSync(join(dirPath, "note.txt"));
+
+			await expect(engine.update("Guarded Dir")).rejects.toThrow(/Refusing to wipe/);
+			const kb = engine.list().find((candidate) => candidate.name === "Guarded Dir");
+			// The index must remain intact (chunks preserved, not marked ready-with-zero).
+			expect(kb?.chunk_count).toBe(chunkCountBefore);
+		});
+
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
 			vi.stubGlobal(
 				"fetch",
-				vi.fn(async () => new Response(body, { status: 200 })),
+				vi.fn(async () => new Response(body, { status: 200, headers: { "content-type": "text/html" } })),
 			);
 
 			await engine.add("https://example.test/docs", "URL");
@@ -583,7 +600,10 @@ describe("KnowledgeEngine", () => {
 				"fetch",
 				vi.fn(
 					async () =>
-						new Response("<html><body>URL abort content about authentication tokens.</body></html>", { status: 200 }),
+						new Response("<html><body>URL abort content about authentication tokens.</body></html>", {
+							status: 200,
+							headers: { "content-type": "text/html" },
+						}),
 				),
 			);
 			await engine.add("https://example.test/abort-docs", "URL Abort");

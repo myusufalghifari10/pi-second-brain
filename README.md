@@ -116,7 +116,8 @@ omp install ./pi-knowledge
 # Search
 > Search my knowledge base for "authentication flow"
 
-# The agent also auto-searches relevant knowledge before answering domain questions
+# With PI_KNOWLEDGE_AUTO_INJECT=true, the agent also auto-searches relevant
+# knowledge before answering domain questions (opt-in, see configuration.md)
 ```
 
 ## Tools
@@ -238,7 +239,7 @@ All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/
 ~/.pi/knowledge/
 ├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
 ├── vectors/          ← Embedding vectors per KB (binary)
-└── models/           ← Downloaded ONNX models (~32MB, cached)
+└── models/           ← Downloaded ONNX models (~118MB fp32, cached)
 ```
 
 - **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`

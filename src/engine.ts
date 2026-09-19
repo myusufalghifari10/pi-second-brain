@@ -757,10 +757,42 @@ function isWeakAutoResponse(
 	return false;
 }
 
+const URL_FETCH_TIMEOUT_MS = 60_000;
+const URL_MAX_BYTES = 10 * 1024 * 1024; // aligns with the chunker MAX_FILE_SIZE cap
+const URL_TEXT_CONTENT_TYPES = /^(text\/|application\/xhtml\+xml|application\/json)/i;
+
 async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
-	const res = await fetch(source, { signal });
+	// Hard timeout: a stalled server must fail the update instead of hanging the indexing job.
+	const timeout = AbortSignal.timeout(URL_FETCH_TIMEOUT_MS);
+	const composed = signal ? AbortSignal.any([signal, timeout]) : timeout;
+	const res = await fetch(source, { signal: composed });
 	if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-	const html = await res.text();
+	const contentType = res.headers.get("content-type") ?? "";
+	if (!URL_TEXT_CONTENT_TYPES.test(contentType)) {
+		throw new Error(
+			`Fetch failed: unsupported content-type "${contentType || "unknown"}" — only text/*, xhtml, and JSON URLs are ingested`,
+		);
+	}
+	// Stream with a hard byte cap: an unbounded res.text() on a large payload OOMs the process.
+	const reader = res.body?.getReader();
+	let html = "";
+	if (reader) {
+		const decoder = new TextDecoder();
+		let received = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			received += value.byteLength;
+			if (received > URL_MAX_BYTES) {
+				await reader.cancel().catch(() => {});
+				throw new Error(`Fetch failed: response exceeds the ${URL_MAX_BYTES} byte URL ingest cap`);
+			}
+			html += decoder.decode(value, { stream: true });
+		}
+		html += decoder.decode();
+	} else {
+		html = await res.text();
+	}
 	const text = html
 		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
 		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -1313,22 +1345,25 @@ export class KnowledgeEngine {
 		}
 
 		const embeddingConfig = resolveEmbeddingConfig();
-		const kb = createKB(db, {
-			name,
-			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
-			source_type: sourceType,
-			source_options: serializeAddOptions(options),
-			embedding_model: embeddingConfigLabel(embeddingConfig),
-		});
-		updateKBStatus(db, kb.id, "indexing");
-		startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
-		// Layer 3 (spec §3.3): the formula flag is stamped only AFTER all rows are written (end of
-		// the success path, beside the label graph) — an interrupted add leaves flag=0 so the
-		// first math query backfills/repairs instead of being disabled forever.
-
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
+		// createKB/status/job run inside the try so a DB-level throw can never leak a KB row
+		// stuck in "indexing" with no vector file and no cleanup path (the catch deleteKBs it
+		// via the getKBByName re-read below).
 		try {
+			const kb = createKB(db, {
+				name,
+				source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
+				source_type: sourceType,
+				source_options: serializeAddOptions(options),
+				embedding_model: embeddingConfigLabel(embeddingConfig),
+			});
+			updateKBStatus(db, kb.id, "indexing");
+			startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
+			// Layer 3 (spec §3.3): the formula flag is stamped only AFTER all rows are written (end of
+			// the success path, beside the label graph) — an interrupted add leaves flag=0 so the
+			// first math query backfills/repairs instead of being disabled forever.
+
 			const vectorPath = this.vectorPathFor(kb.id);
 			tempVectorFile = tempVectorPath(vectorPath);
 			const writer = openVectorWriter(tempVectorFile);
@@ -1527,18 +1562,27 @@ export class KnowledgeEngine {
 			onProgress?.(readyMessage);
 			return { kb: savedKB, chunkCount };
 		} catch (e) {
-			vectorWriter?.close();
+			try {
+				vectorWriter?.close();
+			} catch {
+				// close() writes via writeSync — a disk-full throw here must not abort the
+				// rollback (rm + deleteKB) or mask the original error.
+			}
 			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
-			if (this.db) {
+			// createKB/status/job are inside the try now: re-read the KB by name so a failure at
+			// any point after creation still cleans up the partial row (and a failure BEFORE
+			// creation cleans up nothing).
+			const created = this.db ? getKBByName(this.db, name) : undefined;
+			if (this.db && created) {
 				finishIndexingJob(
 					this.db,
-					kb.id,
+					created.id,
 					isCancellationError(e) ? "cancelled" : "failed",
 					isCancellationError(e) ? "Indexing cancelled." : "Indexing failed.",
 					e instanceof Error ? e.message : String(e),
 				);
-				deleteKB(this.db, kb.id);
-				this.deleteVectorFile(kb.id);
+				deleteKB(this.db, created.id);
+				this.deleteVectorFile(created.id);
 			}
 			throw e;
 		}
@@ -1809,6 +1853,17 @@ export class KnowledgeEngine {
 			addedVectorWriter.close();
 			addedVectorWriter = undefined;
 
+			// Data-safety guard: a directory scan that yielded zero readable files against a
+			// non-empty KB is far more likely a broken mount, chmod'd-away directory, or offline
+			// network drive (existsSync stays true for all of them) than an intentional full
+			// deletion. Abort non-cancellably and keep the index intact — intentional emptying
+			// should go through knowledge_remove.
+			if (kb.source_type === "directory" && scannedFiles === 0 && kb.chunk_count > 0) {
+				throw new Error(
+					`Update aborted: source directory "${kb.source_path}" yielded no readable files while the KB holds ${kb.chunk_count} chunks. Refusing to wipe the index — if emptying it is intentional, remove the KB instead.`,
+				);
+			}
+
 			const idsToRemove: string[] = [];
 			for (const entries of existingHashes.values()) {
 				idsToRemove.push(...entries.map((entry) => entry.id));
@@ -1935,7 +1990,11 @@ export class KnowledgeEngine {
 
 			return { added: addedCount, removed: idsToRemove.length, unchanged };
 		} catch (e) {
-			addedVectorWriter?.close();
+			try {
+				addedVectorWriter?.close();
+			} catch {
+				// preserve the original error and let the rollback below complete
+			}
 			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			if (insertedChunkIds.length > 0) {
@@ -2891,12 +2950,28 @@ export class KnowledgeEngine {
 			// Formula rows were written per inserted batch; stamp the index built so the first
 			// math query skips a redundant full-KB backfill (parity with the add path stamp).
 			markFormulaIndexBuilt(this.db, kb.id);
+			// A cleanly line-truncated file parses fine but silently imports partial data; the
+			// declared chunk_count is the only integrity signal — honor it (the catch rolls the
+			// partial KB back).
+			if (typeof header.chunk_count === "number" && inserted < header.chunk_count) {
+				throw new Error(
+					`Import file is incomplete: declared ${header.chunk_count} chunks but only ${inserted} were present`,
+				);
+			}
 			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${inserted} chunks`);
 			return { kb: savedKB, chunkCount: inserted };
 		} catch (error) {
-			lines.close();
+			try {
+				lines.close();
+			} catch {
+				// preserve the original error and let the rollback below complete
+			}
 			stream.destroy();
-			vectorWriter?.close();
+			try {
+				vectorWriter?.close();
+			} catch {
+				// preserve the original error and let the rollback below complete
+			}
 			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
 			if (this.db && kb) {
 				finishIndexingJob(

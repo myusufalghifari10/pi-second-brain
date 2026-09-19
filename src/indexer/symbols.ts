@@ -8,16 +8,26 @@ const CONFIG_EXTENSIONS = new Set([".json", ".yaml", ".yml", ".toml", ".env"]);
 const TEX_EXTENSIONS = new Set([".tex", ".ltx", ".latex"]);
 const LATEX_SECTION_DEPTHS: Record<string, number> = { chapter: 1, section: 2, subsection: 3, subsubsection: 4 };
 
-function lineNumberAt(content: string, offset: number): number {
-	let line = 1;
-	for (let i = 0; i < offset; i++) {
-		if (content.charCodeAt(i) === 10) line++;
+// Offsets where each line starts, built in ONE pass. Symbol-dense files previously paid an
+// O(offset) rescan per match (quadratic overall) via lineNumberAt and an O(content) split per
+// symbol via lineEnd; lineAt is O(log lines) and the total is computed once.
+function buildLineStarts(content: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < content.length; i++) {
+		if (content.charCodeAt(i) === 10) starts.push(i + 1);
 	}
-	return line;
+	return starts;
 }
 
-function lineEnd(content: string, startLine: number, maxLines = 12): number {
-	return Math.min(startLine + maxLines, content.split("\n").length);
+function lineAt(lineStarts: number[], offset: number): number {
+	let lo = 0;
+	let hi = lineStarts.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (lineStarts[mid] <= offset) lo = mid;
+		else hi = mid - 1;
+	}
+	return lo + 1;
 }
 
 function makeSymbol(
@@ -114,6 +124,7 @@ function extractConfigSymbols(content: string, filePath: string, fileType: strin
 
 function extractCodeSymbols(content: string, filePath: string, fileType: string): KnowledgeSymbolInsert[] {
 	const symbols: KnowledgeSymbolInsert[] = [];
+	const lineStarts = buildLineStarts(content);
 	const patterns: Array<{ regex: RegExp; kind: SymbolKind; nameIndex: number }> = [
 		{
 			regex: /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)/g,
@@ -143,14 +154,14 @@ function extractCodeSymbols(content: string, filePath: string, fileType: string)
 		for (const match of content.matchAll(pattern.regex)) {
 			const name = match[pattern.nameIndex];
 			const index = match.index ?? 0;
-			const startLine = lineNumberAt(content, index);
+			const startLine = lineAt(lineStarts, index);
 			const key = `${pattern.kind}:${name}:${startLine}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
 			pushSymbol(
 				symbols,
 				makeSymbol(name, pattern.kind, filePath, fileType, startLine, {
-					endLine: lineEnd(content, startLine),
+					endLine: Math.min(startLine + 12, lineStarts.length),
 					signature: match[0].split("\n")[0].trim(),
 					text: match[0].split("\n")[0].trim(),
 				}),
@@ -162,6 +173,7 @@ function extractCodeSymbols(content: string, filePath: string, fileType: string)
 
 function extractRouteSymbols(content: string, filePath: string, fileType: string): KnowledgeSymbolInsert[] {
 	const symbols: KnowledgeSymbolInsert[] = [];
+	const lineStarts = buildLineStarts(content);
 	const patterns: Array<{ regex: RegExp; methodIndex?: number; pathIndex: number; defaultMethod?: string }> = [
 		{
 			regex:
@@ -187,7 +199,7 @@ function extractRouteSymbols(content: string, filePath: string, fileType: string
 			const method = rawMethod === "del" ? "DELETE" : (rawMethod ?? "ANY").toUpperCase();
 			const path = match[pattern.pathIndex];
 			const index = match.index ?? 0;
-			const startLine = lineNumberAt(content, index);
+			const startLine = lineAt(lineStarts, index);
 			const name = `${method} ${path}`;
 			const key = `${name}:${startLine}`;
 			if (seen.has(key)) continue;
