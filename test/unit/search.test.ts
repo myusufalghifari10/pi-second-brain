@@ -53,6 +53,28 @@ describe("search pipeline", () => {
 		it("finds CJK", () => expect(searchBM25(db, "認證").length).toBe(1));
 		it("no match → empty", () => expect(searchBM25(db, "zzzzz")).toEqual([]));
 		it("empty query → empty", () => expect(searchBM25(db, "")).toEqual([]));
+		it("breaks bm25 score ties by insertion order (rowid secondary sort)", () => {
+			const tieKb = createKB(db, { name: "tie", source_type: "text" });
+			const tieIds = insertChunks(
+				db,
+				tieKb.id,
+				[1, 2, 3].map((n) => ({
+					content_hash: contentHash(`tie anchor ${n}`),
+					content: `tie anchor ${n}`,
+					content_tokenized: preTokenizeForFTS(`tie anchor ${n}`),
+					file_path: "tie.md",
+					file_type: "markdown",
+					start_line: n,
+					end_line: n,
+					metadata_json: "{}",
+				})),
+			);
+			// Identical term frequencies → identical bm25 → the rowid tiebreak must keep
+			// insertion order (reverting to bare ORDER BY bm25 makes tie order arbitrary).
+			const results = searchBM25(db, "tie anchor");
+			expect(results.map((r) => r.chunkId)).toEqual(tieIds);
+		});
+
 		it("returns relevance scores where higher is better", () => {
 			const results = searchBM25(db, "OAuth token");
 			expect(results[0].score).toBeGreaterThan(0);

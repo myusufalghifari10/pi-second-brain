@@ -54,6 +54,8 @@ const toolState = vi.hoisted(() => ({
 	searchOptions: undefined as unknown,
 	removeTargets: [] as string[],
 	clearCalls: 0,
+	stopWatcherCalls: [] as string[],
+	stopAllCalls: 0,
 	doctorReport: {
 		health_score: 65,
 		summary: "1 blocking, 0 warning, 0 info issues.",
@@ -93,9 +95,9 @@ vi.mock("../../src/engine.ts", () => ({
 			};
 		}
 
-		list(signal?: AbortSignal): [] {
+		list(signal?: AbortSignal): Array<{ id: string; name: string }> {
 			if (signal?.aborted) throw new Error("Cancelled");
-			return [];
+			return [{ id: "kb-1", name: "repo" }];
 		}
 
 		async search(_query: string, options: unknown): Promise<typeof toolState.searchResponse> {
@@ -147,7 +149,12 @@ vi.mock("../../src/watcher/file-watcher.ts", () => ({
 		return 0;
 	},
 	startWatcher(): void {},
-	stopAllWatchers(): void {},
+	stopWatcher(kbId: string): void {
+		toolState.stopWatcherCalls.push(kbId);
+	},
+	stopAllWatchers(): void {
+		toolState.stopAllCalls++;
+	},
 }));
 
 describe("public tool contracts", () => {
@@ -156,6 +163,8 @@ describe("public tool contracts", () => {
 		toolState.searchOptions = undefined;
 		toolState.removeTargets = [];
 		toolState.clearCalls = 0;
+		toolState.stopWatcherCalls = [];
+		toolState.stopAllCalls = 0;
 	});
 
 	it("declares host approval tiers for every public tool", async () => {
@@ -241,6 +250,23 @@ describe("public tool contracts", () => {
 		).resolves.toMatchObject({ content: [{ text: "All knowledge bases cleared." }] });
 		expect(toolState.removeTargets).toEqual(["repo"]);
 		expect(toolState.clearCalls).toBe(1);
+	});
+
+	it("stops the removed KB's watcher on remove and all watchers on clear", async () => {
+		const tools = await registeredTools();
+
+		await tools.knowledge_remove.execute?.(
+			"remove",
+			{ target: "repo", confirm: true },
+			undefined,
+			undefined,
+			undefined,
+		);
+		// The watcher must be stopped with the RESOLVED kb id (name → id), not the raw target.
+		expect(toolState.stopWatcherCalls).toEqual(["kb-1"]);
+
+		await tools.knowledge_clear.execute?.("clear", { confirm: true }, undefined, undefined, undefined);
+		expect(toolState.stopAllCalls).toBe(1);
 	});
 
 	it("guides empty symbol lookups toward fallback search and doctor checks", async () => {

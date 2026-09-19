@@ -312,6 +312,12 @@ async function main(): Promise<void> {
 			: await runKb(goldenFiles, args.kbName as string, args.k);
 	process.stdout.write(renderReport(args.mode, args.kbName, args.k, outcomes, skipped));
 	if (args.mode === "fixture") {
+		// A gate with zero executed queries is vacuous: if every golden entry drifted to kb-scoped
+		// (skipped in fixture mode), misses would be empty and the gate would pass testing nothing.
+		if (outcomes.length === 0) {
+			console.error("eval: fixture gate FAILED — 0 queries executed (all golden entries are kb-scoped)");
+			process.exit(1);
+		}
 		const misses = outcomes.filter((o) => !o.pass);
 		if (misses.length > 0) {
 			console.error(`eval: fixture gate FAILED — ${misses.length} golden query(ies) missed their anchor`);

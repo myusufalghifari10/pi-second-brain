@@ -580,6 +580,47 @@ describe("KnowledgeEngine", () => {
 			expect(kb?.chunk_count).toBe(chunkCountBefore);
 		});
 
+		it("rejects non-text URL content types", async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response("%PDF-bytes", { status: 200, headers: { "content-type": "application/pdf" } })),
+			);
+			await expect(engine.add("https://example.test/doc.pdf", "Bad URL Type")).rejects.toThrow(
+				/unsupported content-type/,
+			);
+		});
+
+		it("composes the fetch timeout signal with the caller signal", async () => {
+			let capturedInit: RequestInit | undefined;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_input: unknown, init?: RequestInit) => {
+					capturedInit = init;
+					return new Response("<html><body>Timeout probe content about authentication tokens.</body></html>", {
+						status: 200,
+						headers: { "content-type": "text/html" },
+					});
+				}),
+			);
+			await engine.add("https://example.test/timeout-probe", "Timeout Probe");
+			expect(capturedInit?.signal).toBeDefined();
+		});
+
+		it("caps URL ingestion at the byte limit", async () => {
+			const oversized = "<p>overflow padding content for the byte cap probe</p>".repeat(200_000); // ~11MB
+			const stream = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(new TextEncoder().encode(oversized));
+					controller.close();
+				},
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(stream, { status: 200, headers: { "content-type": "text/html" } })),
+			);
+			await expect(engine.add("https://example.test/huge", "Huge URL")).rejects.toThrow(/ingest cap/);
+		});
+
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
 			vi.stubGlobal(
@@ -1639,6 +1680,27 @@ describe("KnowledgeEngine", () => {
 			writeFileSync(inputPath, `${JSON.stringify({ name: "Import Duplicate" })}\n`);
 
 			await expect(engine.importKB(inputPath)).rejects.toThrow('Knowledge base "Import Duplicate" already exists');
+		});
+
+		it("fails an import whose declared chunk_count exceeds the file's chunks", async () => {
+			// A cleanly line-truncated JSONL parses fine but would silently import partial data;
+			// the header's declared chunk_count is the integrity signal (rolled back on mismatch).
+			const lines = [
+				JSON.stringify({ name: "Partial Import", description: "", source_type: "text", chunk_count: 2 }),
+				JSON.stringify({
+					content: "Only one chunk about authentication tokens and sessions lives in this file.",
+					file_path: "one.md",
+					file_type: "markdown",
+					start_line: 1,
+					end_line: 1,
+					metadata_json: "{}",
+				}),
+			];
+			const importPath = join(TEST_DIR, "partial.jsonl");
+			writeFileSync(importPath, `${lines.join("\n")}\n`);
+
+			await expect(engine.importKB(importPath)).rejects.toThrow(/incomplete/);
+			expect(engine.list().find((candidate) => candidate.name === "Partial Import")).toBeUndefined();
 		});
 
 		it("imports exported KBs as portable text sources", async () => {

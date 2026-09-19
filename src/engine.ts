@@ -2551,8 +2551,11 @@ export class KnowledgeEngine {
 		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
-		deleteKB(this.db, kb.id);
+		// Vector file first: if its deletion throws (EACCES/EBUSY), the KB row survives and the
+		// caller's watcher stays consistent with the still-existing KB. Row-first would leave a
+		// deleted row with a live watcher on partial failure.
 		this.deleteVectorFile(kb.id);
+		deleteKB(this.db, kb.id);
 		return true;
 	}
 
@@ -2567,8 +2570,9 @@ export class KnowledgeEngine {
 		if (this.disposing) throw new Error("Knowledge engine is shutting down");
 		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
 		for (const kb of listKBs(this.db)) {
-			deleteKB(this.db, kb.id);
+			// Same ordering rationale as remove(): vector file before row.
 			this.deleteVectorFile(kb.id);
+			deleteKB(this.db, kb.id);
 		}
 	}
 

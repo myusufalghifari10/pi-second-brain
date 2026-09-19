@@ -905,8 +905,13 @@ export default function (pi: ExtensionAPI) {
 				throw new Error("Confirmation required: pass confirm=true for destructive clear");
 			}
 			const { engine, watcher } = await ensureInitialized();
-			engine.clear();
-			watcher.stopAllWatchers();
+			// stopAllWatchers in finally: a mid-loop rmSync failure in clear() must not leave
+			// watchers of already-deleted KBs scanning deleted trees forever.
+			try {
+				engine.clear();
+			} finally {
+				watcher.stopAllWatchers();
+			}
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
 		},
 	});
