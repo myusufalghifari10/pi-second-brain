@@ -39,6 +39,21 @@ describe("embedding provider", () => {
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
 	});
 
+	it("rejects an API response whose vector count does not match the input count", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "http://127.0.0.1:8080/v1");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		// A nonconforming endpoint returning an empty/short data array would otherwise surface as
+		// an undefined vector and crash the search path with a TypeError.
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => jsonResponse({ data: [] })),
+		);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await expect(embedDocuments(["hello"])).rejects.toThrow(/0 vectors for 1 inputs/);
+	});
+
 	it("surfaces API embedding failures by default instead of silently falling back", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1");
