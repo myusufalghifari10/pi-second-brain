@@ -315,7 +315,7 @@
 - `knowledge_symbol_search` uses symbols emitted from the same AST analysis so methods can be exact-looked-up even when the parent class is one retrieval chunk.
 - Add/update parse each code file once for chunks and symbols; fallback keeps existing text/regex behavior when AST parsing is unsupported or fails.
 - Tree-sitter imports stay lazy in indexing/chunking paths; root `index.ts` remains startup-light.
-- Parser baseline is `tree-sitter@0.25.1` with a root `overrides.tree-sitter` pin because several maintained grammars still publish older peer ranges while runtime parsing works against the 0.25 ABI; JavaScript uses `tree-sitter-javascript` directly instead of the legacy TypeScript package export.
+- Parser baseline (amended post-0.10.1): the shipped graph is `tree-sitter@0.21.1` with peer-aligned grammars and NO root `overrides.tree-sitter` pin — the earlier `0.25.1` + root-override plan was rolled back in 0.10.1 (#14) to stop peer-override warnings; see `docs/known-pitfalls.md` for the current baseline and the ❌-marked `0.25.1`-without-override case. JavaScript still uses `tree-sitter-javascript` directly instead of the legacy TypeScript package export.
 - Ambiguous `.h` headers remain conservatively classified as text; C++ AST support covers `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, and `.hxx` where the extension itself identifies the language.
 
 **理由**:
@@ -387,7 +387,7 @@
 - PDF extraction goes through an optional external converter sidecar that emits Markdown with `$$…$$` LaTeX math, flowing directly into the existing math-aware chunking pipeline. The sidecar is a user-installed external binary (pip); this package never bundles or ships it and adds no npm dependency.
 - marker is primary, docling the fallback; both share one adapter contract. `PI_KNOWLEDGE_PDF_ENGINE=auto` probes marker → docling → none (`--help` probe, cached per process).
 - Fail-open on every path: not installed, detection failure, conversion failure, or timeout (default 120 s, adjustable via `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS`) all fall back to the existing unpdf path; conversion failures after a converter was detected are recorded as `pdf_sidecar_failed` skipped stats. With `engine=off`, behavior is identical to unpdf-only.
-- Conversion results are cached by content hash: key = `sha256(sha256(pdf file bytes) + resolved converter (the engine actually selected in `auto` mode, not the configured value) + adapterVersion)`, stored under `<knowledge-dir>/pdf-cache/`; unchanged PDFs never re-convert; a corrupt cache entry is always a miss, never an error.
+- Conversion results are cached by content hash: key = `sha256(sha256(pdf file bytes) + resolved converter (the engine actually selected in `auto` mode, not the configured value) + adapterVersion + OCR setting (engine/command))`, stored under `<knowledge-dir>/pdf-cache/`; unchanged PDFs never re-convert; a corrupt cache entry is always a miss, never an error.
 - Child processes run via `execFile(file, args)` argv arrays, never a shell; the PDF path enters as a single argv element. The `PI_KNOWLEDGE_PDF_SIDECAR_CMD` argv-template escape hatch also executes no-shell, with a `maxBuffer` cap and timeout kill.
 - Converted chunks keep `file_type: "pdf"` (existing filter compatibility), record `converter` in `metadata_json`, and gain a `Converter:` context-prefix line.
 - marker model weights are licensed OpenRAIL-M: this package never bundles, downloads, or redistributes weights; users install under marker's own terms.
