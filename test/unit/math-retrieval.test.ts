@@ -1,4 +1,6 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkMarkdown } from "../../src/indexer/chunker.ts";
@@ -6,7 +8,7 @@ import { searchBM25 } from "../../src/search/bm25.ts";
 import { normalizedQueryText } from "../../src/search/query.ts";
 import { createKB, getChunkById, insertChunks, openDatabase } from "../../src/storage/sqlite.ts";
 
-const TEST_DIR = "/tmp/pk-test-math-retrieval";
+let TEST_DIR = "";
 
 function doc(title: string, body: string): string {
 	return `## ${title}\n\n${body}`;
@@ -36,7 +38,7 @@ describe("math-aware retrieval (engine-less FTS)", () => {
 	let chunkIdByDoc: Record<string, string>;
 
 	beforeEach(() => {
-		rmSync(TEST_DIR, { recursive: true, force: true });
+		TEST_DIR = mkdtempSync(join(tmpdir(), "pk-test-math-retrieval-"));
 		db = openDatabase(TEST_DIR);
 		const kb = createKB(db, { name: "math", source_type: "text" });
 		chunkIdByDoc = {};
@@ -81,5 +83,14 @@ describe("math-aware retrieval (engine-less FTS)", () => {
 		const results = searchBM25(db, "Ω");
 		expect(results.length).toBeGreaterThan(0);
 		expect(results.map((result) => result.chunkId)).toContain(chunkIdByDoc.omegaNotation);
+	});
+
+	it("canonicalizes a 100KB caret run in under 100ms (single-pass caret chain rewrite)", () => {
+		const text = `${"^".repeat(100_000)}x`;
+		const start = performance.now();
+		const result = normalizedQueryText(text);
+		const elapsed = performance.now() - start;
+		expect(elapsed).toBeLessThan(100);
+		expect(result).toContain("pow");
 	});
 });

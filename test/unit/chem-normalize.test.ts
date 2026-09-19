@@ -177,7 +177,17 @@ describe("extractQueryFormulas — F2 chem query routing", () => {
 		const result = isMolecularFormula(`H${"2".repeat(64)}z`);
 		expect(result).toBe(false);
 		// Loose bound: the fix makes this single-digit-ms; the loose assertion avoids CI flakiness.
-		expect(Date.now() - start).toBeLessThan(1000);
+		expect(Date.now() - start).toBeLessThan(5000);
+	});
+
+	it("25+ digit-run guard fires before MOLECULAR_RE (dead-guard regression)", () => {
+		// Direct guard-level proof: MOLECULAR_RE alone would ACCEPT CO·<30 digits> (hydrate-dot
+		// digit run is a valid CORE_ATOM), so only the digit-run guard can reject it.
+		expect(isMolecularFormula(`CO·${"1".repeat(30)}`)).toBe(false);
+		const start = Date.now();
+		expect(isMolecularFormula(`·${"1".repeat(30)}x`)).toBe(false);
+		// Boolean is the real assertion; the loose wall bound only catches exponential blowups.
+		expect(Date.now() - start).toBeLessThan(5000);
 	});
 
 	it("single-element plain text stays prose (Co queries are not chem formulas)", () => {

@@ -1,6 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	analyzeIndexableContent,
 	buildChunkEmbeddingText,
@@ -128,9 +129,17 @@ describe("chunkText", () => {
 });
 
 describe("walkDir", () => {
-	const tmp = "/tmp/pk-test-walk";
-	it("respects ignores and skips binary", () => {
+	let tmp = "";
+
+	beforeEach(() => {
+		tmp = mkdtempSync(join(tmpdir(), "pk-test-walk-"));
+	});
+
+	afterEach(() => {
 		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("respects ignores and skips binary", () => {
 		mkdirSync(join(tmp, "src"), { recursive: true });
 		mkdirSync(join(tmp, "docs"), { recursive: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
@@ -156,11 +165,9 @@ describe("walkDir", () => {
 		expect(paths).not.toContain("docs/knowledge-base-full-evaluation-report.md");
 		expect(paths).not.toContain("knowledge-backup.jsonl");
 		expect(paths).not.toContain("browsers/Chromium.app/Contents/Resources/en.lproj/locale.pak");
-		rmSync(tmp, { recursive: true, force: true });
 	});
 
 	it("can include suggested-excluded text after explicit confirmation", () => {
-		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
 		writeFileSync(join(tmp, ".env"), "CONFIRMED_ENV_TEXT=1");
 		writeFileSync(join(tmp, "node_modules", "x.js"), "export const ConfirmedVendorText = true;");
@@ -173,11 +180,9 @@ describe("walkDir", () => {
 		expect(paths).toContain("node_modules/x.js");
 		expect(paths).not.toContain("image.png");
 		expect(scan.skipped.by_reason.binary).toBe(1);
-		rmSync(tmp, { recursive: true, force: true });
 	});
 
 	it("can include a focused suggested-excluded path without including the whole suggested tree", () => {
-		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "node_modules", "chosen"), { recursive: true });
 		mkdirSync(join(tmp, "node_modules", "other"), { recursive: true });
 		writeFileSync(join(tmp, "node_modules", "chosen", "index.js"), "export const ChosenVendorText = true;");
@@ -189,11 +194,9 @@ describe("walkDir", () => {
 		expect(paths).toContain("node_modules/chosen/index.js");
 		expect(paths).not.toContain("node_modules/other/index.js");
 		expect(scan.skipped.by_reason.suggested_excluded).toBeGreaterThan(0);
-		rmSync(tmp, { recursive: true, force: true });
 	});
 
 	it("reports skipped file reasons and samples", () => {
-		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "node_modules"), { recursive: true });
 		writeFileSync(join(tmp, "src.ts"), "export const token = 'ScanToken';");
 		writeFileSync(join(tmp, "node_modules", "ignored.js"), "ignored");
@@ -206,11 +209,9 @@ describe("walkDir", () => {
 		expect(scan.skipped.by_reason.suggested_excluded).toBeGreaterThan(0);
 		expect(scan.skipped.by_reason.binary).toBeGreaterThan(0);
 		expect(scan.skipped.samples.some((sample) => sample.path.includes("node_modules"))).toBe(true);
-		rmSync(tmp, { recursive: true, force: true });
 	});
 
 	it("streams files while accumulating bounded skipped stats", () => {
-		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "src"), { recursive: true });
 		for (let i = 0; i < 30; i++) writeFileSync(join(tmp, "src", `file-${i}.ts`), `export const value${i} = ${i};`);
 		for (let i = 0; i < 40; i++) writeFileSync(join(tmp, `image-${i}.png`), Buffer.from([0x89, 0x50, 0x00]));
@@ -224,11 +225,9 @@ describe("walkDir", () => {
 		expect(paths).toHaveLength(5);
 		expect(skipped.samples.length).toBeLessThanOrEqual(25);
 		expect(summarizeSkippedScan(skipped)).toContain("binary");
-		rmSync(tmp, { recursive: true, force: true });
 	});
 
 	it("can scan file metadata without loading file content", () => {
-		rmSync(tmp, { recursive: true, force: true });
 		mkdirSync(join(tmp, "src"), { recursive: true });
 		writeFileSync(join(tmp, "src", "large.ts"), `export const LargeMetadataToken = "${"x".repeat(1000)}";`);
 		const skipped = createSkippedScanStats();
@@ -239,7 +238,6 @@ describe("walkDir", () => {
 		expect(file.fileType).toBe("typescript");
 		expect(file.size).toBeGreaterThan(1000);
 		expect("content" in file).toBe(false);
-		rmSync(tmp, { recursive: true, force: true });
 	});
 });
 
@@ -559,5 +557,112 @@ describe("chunkFile pdf sidecar threading", () => {
 		// Same protection at the chunkFile layer for a direct non-routing override.
 		const direct = await chunkFile(md, "note.md", { fileTypeOverride: "text", extraMetadata: { converter: "marker" } });
 		expect(direct).toEqual(chunkMarkdown(md, "note.md", "markdown", { converter: "marker" }));
+	});
+});
+
+describe("chunkMarkdown fence-aware headings", () => {
+	it("ignores hash-heading lines inside fenced code (no split, no breadcrumb leak, fence stays atomic)", () => {
+		const md = [
+			"## Guide",
+			"",
+			"Intro paragraph that is long enough to pass the fifty character minimum threshold for chunks.",
+			"",
+			"```bash",
+			"# This comment looks like a markdown heading but is shell syntax",
+			"echo done",
+			"```",
+			"",
+			"Closing paragraph that is also long enough to pass the fifty character minimum threshold.",
+		].join("\n");
+		const chunks = chunkMarkdown(md, "fence.md");
+		expect(chunks).toHaveLength(1);
+		const metadata = JSON.parse(chunks[0].metadata_json);
+		expect(metadata.breadcrumb).toBe("Guide");
+		expect(chunks[0].content).toContain("## Guide");
+		// The fence stays atomic: open fence, comment, and close fence in one chunk.
+		expect(chunks[0].content).toContain(
+			"```bash\n# This comment looks like a markdown heading but is shell syntax\necho done\n```",
+		);
+	});
+
+	it("keeps splitting on real headings after a fence closes (tilde fences included)", () => {
+		const md = [
+			"## One",
+			"",
+			"First section paragraph that is long enough to pass the fifty character threshold here.",
+			"~~~",
+			"# not a heading inside a tilde fence",
+			"~~~",
+			"Second section paragraph that is also long enough to pass the minimum chunk threshold.",
+			"## Two",
+			"",
+			"Third section paragraph that is once again long enough to pass the minimum threshold.",
+		].join("\n");
+		const chunks = chunkMarkdown(md, "fence2.md");
+		expect(chunks).toHaveLength(2);
+		expect(JSON.parse(chunks[0].metadata_json).breadcrumb).toBe("One");
+		expect(JSON.parse(chunks[1].metadata_json).breadcrumb).toBe("Two");
+		expect(chunks[0].content).toContain("# not a heading inside a tilde fence");
+		expect(chunks[1].content).not.toContain("~~~");
+	});
+});
+
+describe("chunker line coordinates", () => {
+	it("reports real start lines for markdown plain-text chunks emitted after a mid-section flush", () => {
+		const para = (word: string) =>
+			`${word} paragraph with enough content to easily pass every chunking threshold used here. `.repeat(10).trim();
+		const md = ["## Big", "", para("Alpha"), "", para("Beta"), "", para("Gamma"), "", para("Delta")].join("\n");
+		const chunks = chunkMarkdown(md, "coords.md");
+		expect(chunks).toHaveLength(4);
+		const [, second, third] = chunks;
+		expect(second.start_line).toBe(5);
+		expect(third.start_line).toBe(7);
+		for (const chunk of chunks) {
+			expect(chunk.end_line).toBe(9);
+			expect(chunk.end_line).toBeGreaterThanOrEqual(chunk.start_line);
+		}
+	});
+
+	it("reports inclusive end lines for plain-text chunks (k lines span start..start+k-1)", () => {
+		const text = Array.from(
+			{ length: 6 },
+			(_, i) => `Line ${i + 1} of the plain text chunk end line test file content.`,
+		).join("\n");
+		const [chunk] = chunkText(text, "lines.txt");
+		expect(chunk.content.split("\n")).toHaveLength(6);
+		expect(chunk.start_line).toBe(1);
+		expect(chunk.end_line).toBe(6);
+	});
+
+	it("oversized single-line paragraphs report single-line spans (inclusive end)", () => {
+		const chunks = chunkText(`LongLineToken ${"x".repeat(8000)}`, "bigline.txt");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.map((chunk) => chunk.start_line)).toEqual([1, 2]);
+		for (const chunk of chunks) {
+			expect(chunk.end_line).toBe(chunk.start_line);
+		}
+	});
+
+	it("oversized markdown text advances by raw slice line count and tiles the file inclusively", () => {
+		const lines = Array.from({ length: 100 }, (_, i) => `Line${i} ${"y".repeat(70)}`);
+		const md = [
+			"## Big",
+			"",
+			"Starter paragraph that is long enough to pass the fifty character minimum threshold.",
+			"",
+			lines.join("\n"),
+		].join("\n");
+		const chunks = chunkMarkdown(md, "biglines.md");
+		expect(chunks).toHaveLength(2);
+		let prevEnd = 0;
+		for (const chunk of chunks) {
+			expect(chunk.start_line).toBeGreaterThan(prevEnd);
+			// Inclusive end: chunk span (end - start + 1) equals the content's real line count.
+			expect(chunk.end_line - chunk.start_line + 1).toBe(chunk.content.split("\n").length);
+			prevEnd = chunk.end_line;
+		}
+		// Slices tile the whole 104-line file; the mid-line char-slice boundary makes both
+		// windows count the split file line, so the last slice reports 105 (104 + 1 slack).
+		expect(chunks.at(-1)?.end_line).toBe(105);
 	});
 });

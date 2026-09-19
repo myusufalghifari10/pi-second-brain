@@ -109,12 +109,16 @@ describe("pdf sidecar", () => {
 			expect(config.cmdTemplate).toBe("node fake.mjs {input} {output_dir}");
 		});
 
-		it("invalid engine behaves as auto and warns once", () => {
+		it("invalid engine behaves as auto and warns once", async () => {
+			// Fresh module instance so module-level warn-once state polluted by any earlier
+			// bogus-engine resolution in this process cannot break the once-only assertion.
+			vi.resetModules();
+			const { resolvePdfSidecarConfig: freshResolve } = await import("../../src/indexer/pdf-sidecar.ts");
 			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 			try {
 				process.env.PI_KNOWLEDGE_PDF_ENGINE = "bogus";
-				expect(resolvePdfSidecarConfig().engine).toBe("auto");
-				expect(resolvePdfSidecarConfig().engine).toBe("auto");
+				expect(freshResolve().engine).toBe("auto");
+				expect(freshResolve().engine).toBe("auto");
 				expect(warn).toHaveBeenCalledTimes(1);
 				expect(warn.mock.calls[0]?.[0]).toContain("PI_KNOWLEDGE_PDF_ENGINE");
 			} finally {

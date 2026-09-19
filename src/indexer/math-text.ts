@@ -160,11 +160,92 @@ const MATH_BOUNDARY = "\x00"; // token boundary marker; never present in input, 
 
 // Caret rule: ^2 / ^{ij} / ^n → powN; non-alphanumeric braced body (^{\top}) → bare pow.
 // The boundary marker is treated as space so caret composition with mapped unicode (^∞ → powinfty) works.
-const CARET_RE = new RegExp(`\\^(?:[\\s${MATH_BOUNDARY}])*(?:\\{([A-Za-z0-9]+)\\}|([A-Za-z0-9]+)|\\{([^}]*)\\})`, "g");
+// Chains of carets separated only by whitespace/boundary runs each contribute one `pow`
+// (^^x → powpowx), matching the historical fixpoint semantics — but the single left-to-right
+// pass in rewriteCaretChains consumes a whole chain at once instead of re-scanning the
+// string once per caret (the previous do-while was O(n²) on adjacent-caret runs).
+const BOUNDARY_RUN_RE = new RegExp(`(?: *${MATH_BOUNDARY})+ *`, "g");
 
-function caretReplacer(_match: string, bracedAlnum: string | undefined, bare: string | undefined): string {
-	const body = bracedAlnum ?? bare;
-	return `${MATH_BOUNDARY}pow${body ?? ""}${MATH_BOUNDARY}`;
+function isCaretSep(ch: string | undefined): boolean {
+	return ch !== undefined && (ch === MATH_BOUNDARY || /\s/.test(ch));
+}
+
+function isCaretBodyChar(ch: string | undefined): boolean {
+	return ch !== undefined && ((ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9"));
+}
+
+// Caret body at `start`, preserving the historical CARET_RE alternative order and captures:
+// {alnum} → braced-alnum body; bare alnum run; {other} → braced body with empty capture.
+function matchCaretBody(text: string, start: number): { end: number; captured: string } | undefined {
+	const ch = text[start];
+	if (ch === undefined) return undefined;
+	if (ch === "{") {
+		let k = start + 1;
+		while (k < text.length && isCaretBodyChar(text[k])) k++;
+		if (k > start + 1 && text[k] === "}") return { end: k + 1, captured: text.slice(start + 1, k) };
+		const close = text.indexOf("}", start + 1);
+		if (close !== -1) return { end: close + 1, captured: "" };
+		return undefined;
+	}
+	if (isCaretBodyChar(ch)) {
+		let k = start;
+		while (k < text.length && isCaretBodyChar(text[k])) k++;
+		return { end: k, captured: text.slice(start, k) };
+	}
+	return undefined;
+}
+
+interface CaretRun {
+	start: number;
+	end: number;
+}
+
+// Rewrites all caret chains in one pass. A maximal run of carets is consumed when the text
+// after its trailing separator run is a body, or when the next caret run through that
+// separator run is consumed (chain transitivity, resolved right-to-left). A consumed chain
+// of `n` carets emits boundary + `pow` × n + terminal body capture + boundary; unconsumed
+// carets pass through verbatim.
+function rewriteCaretChains(mapped: string): string {
+	const runs: CaretRun[] = [];
+	for (let i = 0; i < mapped.length; i++) {
+		if (mapped[i] !== "^") continue;
+		let j = i;
+		while (j < mapped.length && mapped[j] === "^") j++;
+		runs.push({ start: i, end: j });
+		i = j - 1;
+	}
+	const chains = new Map<number, { chainEnd: number; pows: number; captured: string }>();
+	for (let r = runs.length - 1; r >= 0; r--) {
+		const run = runs[r];
+		if (!run) continue;
+		let j = run.end;
+		while (j < mapped.length && isCaretSep(mapped[j])) j++;
+		const body = matchCaretBody(mapped, j);
+		if (body) {
+			chains.set(run.start, { chainEnd: body.end, pows: run.end - run.start, captured: body.captured });
+			continue;
+		}
+		const next = runs[r + 1];
+		const nextChain = next ? chains.get(next.start) : undefined;
+		if (next && next.start === j && nextChain) {
+			chains.set(run.start, {
+				chainEnd: nextChain.chainEnd,
+				pows: run.end - run.start + nextChain.pows,
+				captured: nextChain.captured,
+			});
+		}
+	}
+	let out = "";
+	for (let i = 0; i < mapped.length; i++) {
+		const chain = chains.get(i);
+		if (chain) {
+			out += `${MATH_BOUNDARY}pow${"pow".repeat(chain.pows - 1)}${chain.captured}${MATH_BOUNDARY}`;
+			i = chain.chainEnd - 1;
+			continue;
+		}
+		out += mapped[i];
+	}
+	return out;
 }
 
 export function canonicalizeMathText(text: string): string {
@@ -180,14 +261,7 @@ export function canonicalizeMathText(text: string): string {
 	if (!hasMath) return text;
 
 	const mapped = text.replace(MAPPED_CHARS_RE, (ch) => `${MATH_BOUNDARY}${ALL_FOLDS[ch]}${MATH_BOUNDARY}`);
-	let withPow = mapped;
-	let prev: string;
-	do {
-		prev = withPow;
-		withPow = withPow.replace(CARET_RE, caretReplacer);
-	} while (withPow !== prev);
-
-	return withPow.replace(new RegExp(`(?: *${MATH_BOUNDARY})+ *`, "g"), " ").trim();
+	return rewriteCaretChains(mapped).replace(BOUNDARY_RUN_RE, " ").trim();
 }
 
 // --- Protected-region scanner ---

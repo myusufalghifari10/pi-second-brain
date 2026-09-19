@@ -209,7 +209,7 @@ export function isMolecularFormula(text: string): boolean {
 	// extending an element's greedy \\d*, and the CORE_ATOM lookbehind removes the
 	// partition ambiguity between that \\d* and the bare \\d+ alternative that made
 	// such runs backtrack exponentially. Reject these inputs without running the RE.
-	if (/\\d{25}/.test(candidate)) return false;
+	if (/\d{25}/.test(candidate)) return false;
 	if (!MOLECULAR_RE.test(candidate)) return false;
 	if (!/[A-Z]/.test(candidate)) return false;
 	const elementTokens = candidate.match(new RegExp(ELEMENT_SOURCE, "g"));

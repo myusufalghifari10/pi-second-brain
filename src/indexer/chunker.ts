@@ -624,11 +624,15 @@ function pushOversizedText(
 	let offset = 0;
 	let sliceStart = start;
 	while (offset < text.length) {
-		const slice = text.slice(offset, offset + MAX_TEXT_CHUNK_CHARS).trim();
+		// Advance by the RAW slice's line count: trim() can remove trailing blank lines and
+		// undercount consumed lines, drifting every later chunk's start/end lines earlier.
+		const rawSlice = text.slice(offset, offset + MAX_TEXT_CHUNK_CHARS);
+		const slice = rawSlice.trim();
+		const sliceLines = rawSlice.split("\n").length;
 		if (slice.length >= 50) {
-			pushChunk(slice, sliceStart, sliceStart + slice.split("\n").length, formulas);
+			pushChunk(slice, sliceStart, sliceStart + sliceLines - 1, formulas);
 		}
-		sliceStart += slice.split("\n").length;
+		sliceStart += sliceLines;
 		offset += MAX_TEXT_CHUNK_CHARS;
 	}
 }
@@ -685,13 +689,19 @@ function assembleChunkBlocks(
 		const next = [...buffer.map((b) => b.text), block.text].join("\n\n");
 		if (estimateTokens(next) > targetTokens && buffer.length > 0) {
 			flushBuffer();
-			bufferStart = defaultEndLine;
+			bufferStart = block.startLine;
 		}
 		buffer.push(block);
 	}
 
 	flushBuffer();
 }
+
+// Fenced code blocks (``` or ~~~) protect their lines from markdown heading scanning:
+// a `# comment` inside an open fence must not split the section nor enter headingStack.
+const MD_FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})/;
+const MD_BACKTICK_CLOSE_RE = /^\s*`{3,}\s*$/;
+const MD_TILDE_CLOSE_RE = /^\s*~{3,}\s*$/;
 
 export function chunkMarkdown(
 	content: string,
@@ -743,8 +753,21 @@ export function chunkMarkdown(
 		assembleChunkBlocks(blocks, pushMarkdownChunk, MARKDOWN_TARGET_TOKENS, endLine);
 	}
 
+	let openFence: "`" | "~" | undefined;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
+		if (openFence !== undefined) {
+			const closeRe = openFence === "`" ? MD_BACKTICK_CLOSE_RE : MD_TILDE_CLOSE_RE;
+			if (closeRe.test(line)) openFence = undefined;
+			sectionLines.push(line);
+			continue;
+		}
+		const fenceOpen = MD_FENCE_OPEN_RE.exec(line);
+		if (fenceOpen) {
+			openFence = fenceOpen[1]?.startsWith("`") ? "`" : "~";
+			sectionLines.push(line);
+			continue;
+		}
 		const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
 
 		if (headingMatch && sectionLines.length > 0) {
@@ -783,7 +806,7 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 		if (text.length < 50) return;
 		const metadata: ChunkMetadata = {};
 		if (bufferFormulas.length > 0) metadata.formulas = bufferFormulas;
-		chunks.push(makeChunk(text, filePath, fileType, lineOffset, lineOffset + text.split("\n").length, metadata));
+		chunks.push(makeChunk(text, filePath, fileType, lineOffset, lineOffset + text.split("\n").length - 1, metadata));
 		lineOffset += text.split("\n").length + 1;
 	}
 
@@ -794,7 +817,9 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 			if (slice.length >= 50) {
 				const metadata: ChunkMetadata = {};
 				if (formulas.length > 0) metadata.formulas = formulas;
-				chunks.push(makeChunk(slice, filePath, fileType, lineOffset, lineOffset + slice.split("\n").length, metadata));
+				chunks.push(
+					makeChunk(slice, filePath, fileType, lineOffset, lineOffset + slice.split("\n").length - 1, metadata),
+				);
 			}
 			lineOffset += slice.split("\n").length;
 			offset += MAX_TEXT_CHUNK_CHARS;
