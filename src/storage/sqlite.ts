@@ -79,7 +79,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const ITERATION_BATCH_SIZE = 500;
 
 const FORMULAS_SCHEMA_SQL = `
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS formulas (
 
 CREATE INDEX IF NOT EXISTS idx_formulas_kb_chunk ON formulas(kb_id, chunk_id);
 CREATE INDEX IF NOT EXISTS idx_formulas_kb_norm ON formulas(kb_id, normalized);
+CREATE INDEX IF NOT EXISTS idx_formulas_chunk ON formulas(chunk_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS formulas_fts USING fts5(
   content_tokenized,
@@ -203,6 +204,7 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_kb_id ON chunks(kb_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_kb_file ON chunks(kb_id, file_path);
 
 CREATE TABLE IF NOT EXISTS symbols (
   id TEXT PRIMARY KEY,
@@ -400,6 +402,12 @@ export function openDatabase(knowledgeDir?: string): Database.Database {
 	} else {
 		const row = db.prepare("SELECT version FROM schema_version").get() as { version: number } | undefined;
 		const currentVersion = row?.version ?? 0;
+		if (currentVersion > SCHEMA_VERSION) {
+			throw new Error(
+				`knowledge.db was created by a newer version (schema v${currentVersion} > v${SCHEMA_VERSION}); ` +
+					"upgrade pi-knowledge or choose a different knowledge dir",
+			);
+		}
 		if (currentVersion < SCHEMA_VERSION) {
 			runMigrations(db, currentVersion, SCHEMA_VERSION);
 			db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
@@ -492,6 +500,15 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 			}
 			continue;
 		}
+		if (v === 8) {
+			// Additive query-path indexes: deleteFormulasForChunks deletes by chunk_id without a kb
+			// predicate, and getChunksByFile filters kb_id + file_path on the adaptive search path.
+			db.exec(`
+CREATE INDEX IF NOT EXISTS idx_formulas_chunk ON formulas(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_kb_file ON chunks(kb_id, file_path);
+`);
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -549,13 +566,17 @@ export function listKBs(db: Database.Database): KnowledgeBase[] {
 	return db.prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC").all() as KnowledgeBase[];
 }
 
+// One transaction: a crash between the six statements must not leave a half-deleted KB
+// (e.g. formulas gone while chunks and their built-index flags survive).
 export function deleteKB(db: Database.Database, id: string): void {
-	db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(id);
-	db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(id);
-	db.prepare("DELETE FROM formulas WHERE kb_id = ?").run(id);
-	db.prepare("DELETE FROM label_edges WHERE kb_id = ?").run(id);
-	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(id);
-	db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
+	db.transaction((kbId: string) => {
+		db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM formulas WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM label_edges WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(kbId);
+		db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(kbId);
+	})(id);
 }
 
 export function updateKBStatus(db: Database.Database, id: string, status: KnowledgeBase["status"]): void {
@@ -778,14 +799,6 @@ export function deleteChunksByIds(db: Database.Database, ids: string[]): void {
 	}
 }
 
-export function getChunkHashesByKB(db: Database.Database, kbId: string): Map<string, string> {
-	const rows = db.prepare("SELECT id, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as {
-		id: string;
-		content_hash: string;
-	}[];
-	return new Map(rows.map((r) => [r.content_hash, r.id]));
-}
-
 export function iterateChunkHashesByKB(
 	db: Database.Database,
 	kbId: string,
@@ -925,8 +938,9 @@ export function markFormulaIndexBuilt(db: Database.Database, kbId: string): void
 
 export function listChunksForFormulaBackfill(
 	db: Database.Database,
+	kbId: string,
 ): Array<{ id: string; kb_id: string; metadata_json: string }> {
-	return db.prepare("SELECT id, kb_id, metadata_json FROM chunks ORDER BY rowid").all() as Array<{
+	return db.prepare("SELECT id, kb_id, metadata_json FROM chunks WHERE kb_id = ? ORDER BY rowid").all(kbId) as Array<{
 		id: string;
 		kb_id: string;
 		metadata_json: string;
@@ -935,8 +949,9 @@ export function listChunksForFormulaBackfill(
 
 // --- CRUD: Label Edges ---
 // Like formula rows, label edge rows arrive PRE-resolved (resolution lives in the indexer layer
-// via resolveLabelTarget); storage never resolves. id = sha256 of kb_id, src_chunk_id, scope_key
-// joined by NUL — same convention as formulaRowId.
+// via resolveLabelTarget); storage never resolves. id = sha256 of kb_id, src_chunk_id, scope_key,
+// and kind joined by NUL — same convention as formulaRowId. The kind participates in the hash so
+// a future second edge kind for the same (chunk, scope) cannot collide on the primary key.
 
 export type LabelEdgeKind = "ref" | "label" | "link";
 
@@ -956,8 +971,8 @@ export interface ResolvedLabelEdgeRow {
 	target_content_hash: string | null;
 }
 
-function labelEdgeRowId(kbId: string, chunkId: string, scopeKey: string): string {
-	return createHash("sha256").update(`${kbId}\0${chunkId}\0${scopeKey}`).digest("hex");
+function labelEdgeRowId(kbId: string, chunkId: string, scopeKey: string, kind: LabelEdgeKind): string {
+	return createHash("sha256").update(`${kbId}\0${chunkId}\0${scopeKey}\0${kind}`).digest("hex");
 }
 
 export function replaceLabelEdgesForChunk(
@@ -976,7 +991,7 @@ export function replaceLabelEdgesForChunk(
 		const now = Date.now();
 		for (const row of items) {
 			stmt.run(
-				labelEdgeRowId(kbId, chunkId, row.scopeKey),
+				labelEdgeRowId(kbId, chunkId, row.scopeKey, row.kind),
 				kbId,
 				chunkId,
 				row.targetLabel,
@@ -1009,10 +1024,11 @@ export function markLabelGraphBuilt(db: Database.Database, kbId: string): void {
 
 export function listChunksForLabelBackfill(
 	db: Database.Database,
+	kbId: string,
 ): Array<{ id: string; kb_id: string; metadata_json: string; file_path: string; content_hash: string }> {
 	return db
-		.prepare("SELECT id, kb_id, metadata_json, file_path, content_hash FROM chunks ORDER BY rowid")
-		.all() as Array<{
+		.prepare("SELECT id, kb_id, metadata_json, file_path, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid")
+		.all(kbId) as Array<{
 		id: string;
 		kb_id: string;
 		metadata_json: string;
@@ -1021,20 +1037,32 @@ export function listChunksForLabelBackfill(
 	}>;
 }
 
-export function findResolvedLabelEdges(db: Database.Database, chunkIds: string[]): ResolvedLabelEdgeRow[] {
+export function findResolvedLabelEdges(
+	db: Database.Database,
+	chunkIds: string[],
+	kbId?: string,
+): ResolvedLabelEdgeRow[] {
 	if (chunkIds.length === 0) return [];
 	const results: ResolvedLabelEdgeRow[] = [];
 	const batchSize = 500;
 	for (let offset = 0; offset < chunkIds.length; offset += batchSize) {
 		const batch = chunkIds.slice(offset, offset + batchSize);
 		const placeholders = batch.map(() => "?").join(",");
-		const rows = db
-			.prepare(
-				`SELECT src_chunk_id, target_label, scope_key, resolved_chunk_id, target_content_hash
-				 FROM label_edges
-				 WHERE resolved_chunk_id IS NOT NULL AND src_chunk_id IN (${placeholders})`,
-			)
-			.all(...batch) as ResolvedLabelEdgeRow[];
+		const rows = kbId
+			? (db
+					.prepare(
+						`SELECT src_chunk_id, target_label, scope_key, resolved_chunk_id, target_content_hash
+						 FROM label_edges
+						 WHERE resolved_chunk_id IS NOT NULL AND src_chunk_id IN (${placeholders}) AND kb_id = ?`,
+					)
+					.all(...batch, kbId) as ResolvedLabelEdgeRow[])
+			: (db
+					.prepare(
+						`SELECT src_chunk_id, target_label, scope_key, resolved_chunk_id, target_content_hash
+						 FROM label_edges
+						 WHERE resolved_chunk_id IS NOT NULL AND src_chunk_id IN (${placeholders})`,
+					)
+					.all(...batch) as ResolvedLabelEdgeRow[]);
 		results.push(...rows);
 	}
 	return results;
@@ -1082,7 +1110,9 @@ export function searchFormulasFTS(
 ): Array<{ chunk_id: string; normalized: string; rank: number }> {
 	const safeQuery = buildSafeFormulaFtsQuery(ftsQuery);
 	const safeLimit = Math.max(0, Math.floor(limit));
-	if (!safeQuery || safeLimit === 0) return [];
+	// Number.isFinite is required: Math.floor(NaN) is NaN and binding NaN stores NULL, which
+	// SQLite reads as an unbounded LIMIT.
+	if (!safeQuery || !Number.isFinite(safeLimit) || safeLimit === 0) return [];
 	try {
 		const rows = db
 			.prepare(
@@ -1190,8 +1220,21 @@ export function searchSymbols(
 		}
 	}
 	const where = `WHERE ${clauses.join(" AND ")}`;
-	const limit = Math.max(1, Math.min(200, options.limit ?? 20));
-	const offset = Math.max(0, options.offset ?? 0);
+	// Number.isFinite guards: binding NaN stores NULL, and LIMIT NULL / OFFSET NULL are read by
+	// SQLite as unbounded / 0 instead of the intended defaults.
+	const requestedLimit = options.limit;
+	const limit = Math.max(
+		1,
+		Math.min(
+			200,
+			typeof requestedLimit === "number" && Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : 20,
+		),
+	);
+	const requestedOffset = options.offset;
+	const offset =
+		typeof requestedOffset === "number" && Number.isFinite(requestedOffset)
+			? Math.max(0, Math.trunc(requestedOffset))
+			: 0;
 	return db
 		.prepare(
 			`SELECT s.* FROM symbols s

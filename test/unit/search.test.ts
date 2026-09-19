@@ -1,21 +1,23 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { saveVectors } from "../../src/embedding/vectors.ts";
 import { contentHash, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { searchBM25 } from "../../src/search/bm25.ts";
-import { reciprocalRankFusion, weightedScoreFusion } from "../../src/search/fusion.ts";
+import { weightedScoreFusion } from "../../src/search/fusion.ts";
 import { searchVector, searchVectorFile } from "../../src/search/vector.ts";
 import { createKB, getChunkIdsByKB, insertChunks, openDatabase } from "../../src/storage/sqlite.ts";
 
-const TEST_DIR = "/tmp/pk-test-search";
+let TEST_DIR: string;
 
 describe("search pipeline", () => {
 	let db: Database.Database;
 	let chunkIds: string[];
 
 	beforeEach(() => {
-		rmSync(TEST_DIR, { recursive: true, force: true });
+		TEST_DIR = mkdtempSync(join(tmpdir(), "pk-test-search-"));
 		db = openDatabase(TEST_DIR);
 		const kb = createKB(db, { name: "test", source_type: "text" });
 		const texts = [
@@ -104,23 +106,6 @@ describe("search pipeline", () => {
 			expect(r.results[0].chunkId).toBe(chunkIds[1]);
 			expect(r.vectorsByChunkId.size).toBe(1);
 		});
-	});
-
-	describe("RRF", () => {
-		it("merges with overlap boosted", () => {
-			const l1 = [
-				{ chunkId: "a", score: 1 },
-				{ chunkId: "b", score: 0.5 },
-			];
-			const l2 = [
-				{ chunkId: "b", score: 1 },
-				{ chunkId: "c", score: 0.5 },
-			];
-			const f = reciprocalRankFusion([l1, l2]);
-			expect(f.length).toBe(3);
-			expect(f[0].chunkId).toBe("b"); // in both → highest
-		});
-		it("empty → empty", () => expect(reciprocalRankFusion([[], []])).toEqual([]));
 	});
 
 	describe("weighted fusion", () => {

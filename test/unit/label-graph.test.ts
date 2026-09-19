@@ -171,19 +171,19 @@ describe("chunker metadata.refs threading", () => {
 	});
 });
 
-describe("label graph schema v7 (F7)", () => {
+describe("label graph schema v8 (F7)", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("creates schema version 7 with label_edges table, indexes, and label_graph_built flag column", () => {
+	it("creates schema version 8 with label_edges table, indexes, and label_graph_built flag column", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-label-graph-"));
 		tempDirs.push(dir);
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
 
 			const objects = (kind: string) =>
 				new Set(
@@ -226,7 +226,7 @@ describe("label graph schema v7 (F7)", () => {
 		}
 	});
 
-	it("migrates a v6 database to v7 additively and preserves chunk data", () => {
+	it("migrates a v6 database additively through v7 to v8 and preserves chunk data", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-label-graph-"));
 		tempDirs.push(dir);
 
@@ -248,7 +248,7 @@ describe("label graph schema v7 (F7)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
 			expect(
 				(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).some(
 					(row) => row.name === "label_edges",
@@ -306,7 +306,9 @@ describe("label edge storage API", () => {
 			kind: string;
 		}>;
 		expect(rows).toHaveLength(1);
-		expect(rows[0].id).toBe(createHash("sha256").update(`${kbId}\0${chunkId}\0${edge.scopeKey}`).digest("hex"));
+		expect(rows[0].id).toBe(
+			createHash("sha256").update(`${kbId}\0${chunkId}\0${edge.scopeKey}\0${edge.kind}`).digest("hex"),
+		);
 		expect(rows[0].kb_id).toBe(kbId);
 		expect(rows[0].src_chunk_id).toBe(chunkId);
 		expect(rows[0].target_label).toBe("eq:flux");
@@ -348,9 +350,9 @@ describe("label edge storage API", () => {
 		expect((db.prepare("SELECT COUNT(*) as c FROM label_edges").get() as { c: number }).c).toBe(0);
 	});
 
-	it("lists chunks with metadata, path, and hash for backfill; resolves only resolved edges", () => {
+	it("lists chunks scoped to the kb with metadata, path, and hash for backfill; resolves only resolved edges", () => {
 		const { kbId, chunkId } = setup();
-		const rows = listChunksForLabelBackfill(db);
+		const rows = listChunksForLabelBackfill(db, kbId);
 		expect(rows).toEqual([
 			{
 				id: chunkId,
@@ -360,6 +362,9 @@ describe("label edge storage API", () => {
 				content_hash: expect.any(String),
 			},
 		]);
+		// Other KBs are not scanned by a per-kb backfill.
+		const otherKb = createKB(db, { name: "labels-other", source_type: "text" });
+		expect(listChunksForLabelBackfill(db, otherKb.id)).toEqual([]);
 
 		const target = {
 			targetLabel: "eq:t",
@@ -381,6 +386,9 @@ describe("label edge storage API", () => {
 				target_content_hash: "hash-target",
 			},
 		]);
+		// The optional kbId filter scopes rows to one kb (idx_label_edges_kb_src).
+		expect(findResolvedLabelEdges(db, [chunkId], kbId)).toHaveLength(1);
+		expect(findResolvedLabelEdges(db, [chunkId], "kb-that-does-not-exist")).toEqual([]);
 	});
 });
 
@@ -643,6 +651,9 @@ describe("engine label graph backfill and dependency leg (F7/F8)", () => {
 		);
 		// Boosted retrieval keeps its lexical match_reason (formula-leg precedent).
 		expect(activeResponse.results.every((result) => result.provenance?.match_reason !== "dependency")).toBe(true);
+		// Diagnostics contract: adjusted_score tracks the final (boost-included) published score.
+		const fluxResult = activeResponse.results.find((result) => result.file_path === "docs/flux.md");
+		expect(fluxResult?.ranking?.adjusted_score).toBeCloseTo(scoreOf(activeResponse, "docs/flux.md"), 10);
 		const mainResult = activeResponse.results.find((result) => result.file_path === "docs/main.md");
 		expect(mainResult?.provenance?.depends_on).toEqual([
 			{ label: "eq:flux", chunk_id: chunkIdByFile(active.kbId, "docs/flux.md"), pinned: true },

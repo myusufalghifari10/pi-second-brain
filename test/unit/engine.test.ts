@@ -23,13 +23,13 @@ vi.mock("mammoth", () => ({
 	extractRawText: mammothMock.extractRawText,
 }));
 
-const TEST_DIR = "/tmp/pk-test-engine";
+let TEST_DIR: string;
 
 describe("KnowledgeEngine", () => {
 	let engine: KnowledgeEngine;
 
 	beforeEach(async () => {
-		rmSync(TEST_DIR, { recursive: true, force: true });
+		TEST_DIR = mkdtempSync(join(tmpdir(), "pk-test-engine-"));
 		engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
 		mammothMock.extractRawText.mockReset();
@@ -37,7 +37,8 @@ describe("KnowledgeEngine", () => {
 
 	afterEach(async () => {
 		vi.unstubAllGlobals();
-		await engine.dispose();
+		vi.unstubAllEnvs();
+		await engine.dispose({ disposeModels: false });
 		rmSync(TEST_DIR, { recursive: true, force: true });
 	});
 
@@ -111,7 +112,7 @@ describe("KnowledgeEngine", () => {
 	describe("schema migration", () => {
 		it("opens existing DB without error", async () => {
 			// Dispose and re-initialize (simulates restart)
-			await engine.dispose();
+			await engine.dispose({ disposeModels: false });
 			engine = new KnowledgeEngine();
 			await engine.initialize(TEST_DIR);
 			// Should not throw
@@ -119,7 +120,7 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("migrates existing databases to include indexing job state", async () => {
-			await engine.dispose();
+			await engine.dispose({ disposeModels: false });
 			const db = openDatabase(TEST_DIR);
 			db.prepare("UPDATE schema_version SET version = 1").run();
 			db.prepare("DROP TABLE indexing_jobs").run();
@@ -565,6 +566,62 @@ describe("KnowledgeEngine", () => {
 			expect(engine.list()[0].source_type).toBe("url");
 		});
 
+		it("restores kb status when a URL update aborts mid-fetch", async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async () =>
+						new Response("<html><body>URL abort content about authentication tokens.</body></html>", { status: 200 }),
+				),
+			);
+			await engine.add("https://example.test/abort-docs", "URL Abort");
+
+			// Second fetch rejects the way fetch does when its signal fires mid-flight: an
+			// AbortError with a non-"Cancelled" message (formerly misclassified as a failure).
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					const error = new Error("This operation was aborted");
+					error.name = "AbortError";
+					throw error;
+				}),
+			);
+			await expect(engine.update("URL Abort")).rejects.toThrow("aborted");
+			expect(engine.list().find((kb) => kb.name === "URL Abort")?.status).toBe("ready");
+
+			const db = openDatabase(TEST_DIR);
+			try {
+				const kbId = engine.list().find((kb) => kb.name === "URL Abort")?.id ?? "";
+				const job = getIndexingJob(db, kbId);
+				expect(job?.status).toBe("cancelled");
+				expect(job?.error_message).toContain("aborted");
+			} finally {
+				db.close();
+			}
+		});
+
+		it("fails cleanly when the embedding config turns broken before an update starts", async () => {
+			const filePath = join(TEST_DIR, "broken-env-source.txt");
+			writeFileSync(filePath, "Broken env probe content about authentication tokens and sessions.");
+			await engine.add(filePath, "BrokenEnv");
+			const kbId = engine.list().find((kb) => kb.name === "BrokenEnv")?.id ?? "";
+
+			vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "local:not-a-real-model");
+			await expect(engine.update("BrokenEnv")).rejects.toThrow("Unsupported local embedding model");
+
+			// No stuck "running" job and no "indexing" kb: config resolution happens before the
+			// job/status mutation, so the prior states survive untouched.
+			const db = openDatabase(TEST_DIR);
+			try {
+				const job = getIndexingJob(db, kbId);
+				expect(job?.status).not.toBe("running");
+				expect(job?.status).toBe("succeeded");
+			} finally {
+				db.close();
+			}
+			expect(engine.list().find((kb) => kb.name === "BrokenEnv")?.status).toBe("ready");
+		});
+
 		it("honors cancellation before embedding changed chunks", async () => {
 			const filePath = join(TEST_DIR, "source.ts");
 			mkdirSync(TEST_DIR, { recursive: true });
@@ -787,6 +844,22 @@ describe("KnowledgeEngine", () => {
 
 			const byId = await engine.search("SearchByNameToken", { mode: "fast", kb_id: kb.id });
 			expect(byId.total_count).toBe(byName.total_count);
+		});
+
+		it("throws for an unknown kb_id instead of silently returning empty results", async () => {
+			await engine.add("Unknown scope content about MissingKbToken for the not-found probe.", "Search Present");
+
+			await expect(engine.search("MissingKbToken", { mode: "fast", kb_id: "no-such-kb" })).rejects.toThrow(
+				"Knowledge base not found: no-such-kb",
+			);
+		});
+
+		it("treats a negative offset as 0", async () => {
+			await engine.add("Negative offset content about OffsetClampToken for pagination clamping.", "Offset Clamp");
+
+			const clamped = await engine.search("OffsetClampToken", { mode: "fast", offset: -5 });
+			expect(clamped.results).toHaveLength(1);
+			expect(clamped.has_more).toBe(false);
 		});
 
 		it("diversifies repeated hits from the same file", async () => {

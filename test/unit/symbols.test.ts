@@ -1,4 +1,6 @@
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
@@ -6,13 +8,13 @@ import { analyzeIndexableContent } from "../../src/indexer/chunker.ts";
 import { extractSymbols } from "../../src/indexer/symbols.ts";
 import { createKB, insertSymbols, openDatabase, searchSymbols, updateKBStatus } from "../../src/storage/sqlite.ts";
 
-const TEST_DIR = "/tmp/pk-test-symbols";
+let TEST_DIR: string;
 
 describe("lightweight symbol index", () => {
 	let db: Database.Database;
 
 	beforeEach(() => {
-		rmSync(TEST_DIR, { recursive: true, force: true });
+		TEST_DIR = mkdtempSync(join(tmpdir(), "pk-test-symbols-"));
 		db = openDatabase(TEST_DIR);
 	});
 

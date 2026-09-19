@@ -213,6 +213,10 @@ describe("engine formula search", () => {
 			expect(boosted.provenance?.match_reason).toBe("bm25");
 			expectNoFormulaReasons(boostedResponse);
 			expect(boosted.score - plain.score).toBeCloseTo(FORMULA_BOOST, 10);
+			// Diagnostics contract: adjusted_score tracks the final (boost-included) published
+			// score, and retrieved diagnostics are not marked injected.
+			expect(boosted.ranking?.adjusted_score).toBeCloseTo(boosted.score, 10);
+			expect((boosted.ranking as Record<string, unknown> | undefined)?.injected).toBeUndefined();
 		});
 
 		it("injects the formula chunk via a normalized variant query with match_reason formula", async () => {
@@ -225,6 +229,10 @@ describe("engine formula search", () => {
 			// Exact formula evidence scores 1.0, times the kb trust factor applied to retrieved legs.
 			expect(injected.score).toBeCloseTo(kbTrustMultiplier(getKbById(kbId)), 10);
 			expect(response.total_count).toBe(1);
+			// Injected results carry ranking provenance marked injected, with adjusted_score pinned
+			// to the published injected score.
+			expect((injected.ranking as Record<string, unknown> | undefined)?.injected).toBe(true);
+			expect(injected.ranking?.adjusted_score).toBeCloseTo(injected.score, 10);
 		});
 
 		it("no-math query: golden top chunk and score are deterministic with zero formula reasons", async () => {

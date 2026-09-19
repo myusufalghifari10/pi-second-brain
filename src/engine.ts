@@ -204,19 +204,28 @@ interface RankedChunk {
 	sourceChunkIds: string[];
 }
 
+// Ranking provenance for formula/dependency-injected results. RankingDiagnostics is the frozen
+// published shape (index.ts prints base/adjusted/coverage from it), so injected provenance rides
+// as an extra `injected` property instead of a schema change. Diagnostics contract (non-deep
+// paths, which publish rankingByChunkId): for EVERY published result, ranking.adjusted_score
+// equals result.score. Boosted retrieved chunks get adjusted_score patched to the boosted score;
+// injected chunks carry injected:true with adjusted_score pinned to the injected score — the
+// lexical adjustment fields are informational only, since formula/dependency evidence bypasses
+// MIN_HYBRID_SCORE and is published unadjusted (ratified). Deep mode intentionally publishes
+// rerank-stage diagnostics instead (ranking basis is the rerank score, not rankingByChunkId).
+type InjectedRanking = RankingDiagnostics & { injected: true };
+
+function injectedRankingDiagnostics(chunk: Chunk, score: number, queryTokens: Set<string>): InjectedRanking {
+	const ranking = scoreChunkForQuery(score, chunk, queryTokens);
+	return { ...ranking, adjusted_score: score, injected: true };
+}
+
 export interface DoctorIssue {
 	severity: "blocking" | "warning" | "info";
 	kb_name?: string;
 	message: string;
 	action: string;
-	action_code?:
-		| "run_update"
-		| "rebuild_kb"
-		| "wait_for_indexing"
-		| "review_skipped_scope"
-		| "rebuild_vectors"
-		| "check_source"
-		| "none";
+	action_code?: "run_update" | "rebuild_kb" | "wait_for_indexing" | "review_skipped_scope" | "none";
 }
 
 export interface DoctorReport {
@@ -260,6 +269,11 @@ export interface SymbolSearchResponse {
 }
 
 const INDEX_EMBED_BATCH_SIZE = 64;
+// Retry hints attached to any empty search response, including the deep-mode early return.
+const EMPTY_RESULT_SUGGESTIONS = [
+	"Try mode 'fast' for exact symbols or mode 'semantic' for conceptual wording.",
+	"Run knowledge_status if the KB should contain this answer.",
+];
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 // Layer 3 fuzzy formula leg (spec §3.4.3): top-ranked FTS hit gets 0.8, rank-normalized below.
 const FORMULA_FUZZY_TOP_SCORE = 0.8;
@@ -286,7 +300,12 @@ export interface IndexPlan {
 }
 
 function isCancellationError(error: unknown): boolean {
-	return error instanceof Error && error.message === "Cancelled";
+	if (!(error instanceof Error)) return false;
+	if (error.message === "Cancelled") return true;
+	// User-cancel must restore the prior kb status even when the abort surfaces from a lower
+	// layer: fetch rejects with AbortError and the PDF sidecar rethrows an "aborted" failure.
+	if (error.name === "AbortError") return true;
+	return error.message.toLowerCase().includes("abort");
 }
 
 function tempVectorPath(vectorPath: string): string {
@@ -1002,11 +1021,11 @@ function normalizeLabelGraphPath(p: string): string {
 // get an empty replacement so stale edges are cleared on re-sync. Unresolved edges are recorded
 // with resolved_chunk_id/target_content_hash NULL — never guessed.
 function rebuildLabelGraphForKB(db: Database.Database, kbId: string): void {
-	const kbChunks: Array<{ id: string; file_path: string; content_hash: string; metadata_json: string }> = [];
+	const kbChunks: Array<{ id: string; kb_id: string; file_path: string; content_hash: string; metadata_json: string }> =
+		[];
 	const labelFiles = new Map<string, string[]>();
 	const definingChunkByFileLabel = new Map<string, { chunkId: string; contentHash: string }>();
-	for (const chunk of listChunksForLabelBackfill(db)) {
-		if (chunk.kb_id !== kbId) continue;
+	for (const chunk of listChunksForLabelBackfill(db, kbId)) {
 		kbChunks.push(chunk);
 		const { labels } = labelGraphInputsFromMetadataJson(chunk.metadata_json);
 		for (const label of labels) {
@@ -1181,8 +1200,7 @@ export class KnowledgeEngine {
 			try {
 				const kb = getKB(this.db, kbId);
 				if (!kb || kb.formula_index_built === 1) continue;
-				for (const chunk of listChunksForFormulaBackfill(this.db)) {
-					if (chunk.kb_id !== kbId) continue;
+				for (const chunk of listChunksForFormulaBackfill(this.db, kbId)) {
 					const rows = formulaRowsFromMetadataJson(chunk.metadata_json);
 					if (rows.length === 0) continue;
 					replaceFormulasForChunk(this.db, kbId, chunk.id, rows);
@@ -1562,8 +1580,10 @@ export class KnowledgeEngine {
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
-		updateKBStatus(this.db, kb.id, "indexing");
-		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
+		// Resolve embedding config and source options BEFORE mutating any persistent state: a throw
+		// here (broken PI_KNOWLEDGE_EMBEDDING value, unreadable stored options) must not leave a
+		// permanently "running" indexing job or an "indexing" kb behind — the catch block below
+		// only sees failures raised after updateKBStatus/startIndexingJob have run.
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
 		const embeddingConfig = resolveEmbeddingConfig();
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
@@ -1576,6 +1596,9 @@ export class KnowledgeEngine {
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		const insertedChunkIds: string[] = [];
 		const stagedSymbols: KnowledgeSymbolInsert[] = [];
+
+		updateKBStatus(this.db, kb.id, "indexing");
+		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 
 		try {
 			const vectorPath = this.vectorPathFor(kb.id);
@@ -1972,7 +1995,8 @@ export class KnowledgeEngine {
 			};
 		}
 		const db = this.db;
-		const { mode = "hybrid", offset = 0, kb_id, filters, diversity = "balanced" } = options;
+		const { mode = "hybrid", kb_id, filters, diversity = "balanced" } = options;
+		const offset = Math.max(0, Math.trunc(options.offset ?? 0));
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const queryTokens = tokenizeForSimilarity(query);
@@ -1983,6 +2007,7 @@ export class KnowledgeEngine {
 
 		const warnings: string[] = [];
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
+		if (kb_id && !selectedKB) throw new Error(`Knowledge base not found: ${kb_id}`);
 		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
 		const kbs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
 		const kbById = new Map(kbs.map((kb) => [kb.id, kb]));
@@ -2017,6 +2042,15 @@ export class KnowledgeEngine {
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
 
+		// The query embedding depends only on the query, never on the KB: compute it lazily once
+		// and share the promise across every semantic/hybrid leg, so a workspace with K ready KBs
+		// performs one embedding roundtrip per search instead of K identical ones.
+		let queryEmbeddingPromise: Promise<{ vector: Float32Array; config: EmbeddingConfig }> | undefined;
+		const getQueryEmbedding = (): Promise<{ vector: Float32Array; config: EmbeddingConfig }> => {
+			if (!queryEmbeddingPromise) queryEmbeddingPromise = embedQueryWithConfig(query, signal);
+			return queryEmbeddingPromise;
+		};
+
 		for (const kb of kbs) {
 			throwIfAborted(signal);
 			if (kb.chunk_count === 0) continue;
@@ -2030,7 +2064,7 @@ export class KnowledgeEngine {
 					})),
 				);
 			} else if (retrievalMode === "semantic") {
-				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = await getQueryEmbedding();
 				throwIfAborted(signal);
 				if (!canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					warnings.push(embeddingMismatchWarning(kb));
@@ -2052,7 +2086,7 @@ export class KnowledgeEngine {
 				if (bm25Results.length === 0) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
-				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = await getQueryEmbedding();
 				throwIfAborted(signal);
 				if (canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					const vectorResults = searchVectorFile(
@@ -2113,7 +2147,11 @@ export class KnowledgeEngine {
 			}
 			for (const result of unique) {
 				const formulaScore = formulaScores.get(result.chunkId);
-				if (formulaScore !== undefined) result.score += FORMULA_BOOST * formulaScore;
+				if (formulaScore === undefined) continue;
+				result.score += FORMULA_BOOST * formulaScore;
+				// Diagnostics contract: adjusted_score tracks the final published score.
+				const ranking = rankingByChunkId.get(result.chunkId);
+				if (ranking) ranking.adjusted_score = result.score;
 			}
 		}
 		// Layer 4 label-graph dependency fusion (spec §3.5): post-merge, pre-threshold, beside the
@@ -2127,10 +2165,10 @@ export class KnowledgeEngine {
 		let dependencyEdgesActive = false;
 		let edgesPerTrigger = new Map<string, ResolvedLabelEdgeRow[]>();
 		this.ensureLabelGraphsBuilt(kbs.map((kb) => kb.id));
-		const labelEdgeRows = findResolvedLabelEdges(
-			db,
-			unique.map((result) => result.chunkId),
-		);
+		// kb-scoped lookup per kb (idx_label_edges_kb_src); concatenation is safe because
+		// edgesGroupedPerTrigger re-sorts the full row set deterministically.
+		const triggerChunkIds = unique.map((result) => result.chunkId);
+		const labelEdgeRows = kbs.flatMap((kb) => findResolvedLabelEdges(db, triggerChunkIds, kb.id));
 		if (labelEdgeRows.length > 0) {
 			dependencyEdgesActive = true;
 			edgesPerTrigger = edgesGroupedPerTrigger(labelEdgeRows, DEPENDENCY_WALK_EDGES_PER_CHUNK);
@@ -2152,6 +2190,9 @@ export class KnowledgeEngine {
 					if (targetResult && targetResult !== result && !boostedTargets.has(edge.resolved_chunk_id)) {
 						boostedTargets.add(edge.resolved_chunk_id);
 						targetResult.score += DEPENDENCY_BOOST;
+						// Diagnostics contract: adjusted_score tracks the final published score.
+						const targetRanking = rankingByChunkId.get(edge.resolved_chunk_id);
+						if (targetRanking) targetRanking.adjusted_score = targetResult.score;
 					}
 				}
 				if (dependsOn.length > 0) dependsOnByChunkId.set(result.chunkId, dependsOn);
@@ -2207,7 +2248,9 @@ export class KnowledgeEngine {
 				if (normalizedFileType && chunk.file_type !== normalizedFileType) continue;
 				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) continue;
 				formulaInjectedChunkIds.add(chunkId);
-				filtered.push({ chunkId, score: formulaScore * kbTrustMultiplier(kb) });
+				const injectedScore = formulaScore * kbTrustMultiplier(kb);
+				filtered.push({ chunkId, score: injectedScore });
+				rankingByChunkId.set(chunkId, injectedRankingDiagnostics(chunk, injectedScore, queryTokens));
 				injectedCount += 1;
 			}
 			if (formulaInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
@@ -2220,8 +2263,9 @@ export class KnowledgeEngine {
 		// by the formula leg also trigger the walk ("retrieved/injected", spec §3.5); their
 		// depends_on provenance is recorded here since the pre-threshold pass cannot see them yet.
 		if (dependencyEdgesActive && formulaInjectedChunkIds.size > 0) {
+			const injectedTriggerChunkIds = [...formulaInjectedChunkIds];
 			const injectedTriggerEdges = edgesGroupedPerTrigger(
-				findResolvedLabelEdges(db, [...formulaInjectedChunkIds]),
+				kbs.flatMap((kb) => findResolvedLabelEdges(db, injectedTriggerChunkIds, kb.id)),
 				DEPENDENCY_WALK_EDGES_PER_CHUNK,
 			);
 			for (const [triggerId, edges] of injectedTriggerEdges) {
@@ -2264,7 +2308,9 @@ export class KnowledgeEngine {
 				if (normalizedFileType && chunk.file_type !== normalizedFileType) continue;
 				if (filters?.path_pattern && !chunk.file_path.includes(filters.path_pattern)) continue;
 				dependencyInjectedChunkIds.add(chunkId);
-				filtered.push({ chunkId, score: DEPENDENCY_BOOST * kbTrustMultiplier(kb) });
+				const injectedScore = DEPENDENCY_BOOST * kbTrustMultiplier(kb);
+				filtered.push({ chunkId, score: injectedScore });
+				rankingByChunkId.set(chunkId, injectedRankingDiagnostics(chunk, injectedScore, queryTokens));
 				injectedCount += 1;
 			}
 			if (dependencyInjectedChunkIds.size > 0) filtered.sort((a, b) => b.score - a.score);
@@ -2341,6 +2387,7 @@ export class KnowledgeEngine {
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
 				tuning: tuningSummary,
+				suggestions: results.length === 0 ? EMPTY_RESULT_SUGGESTIONS : undefined,
 			};
 		}
 
@@ -2430,13 +2477,7 @@ export class KnowledgeEngine {
 			warnings: warnings.length > 0 ? warnings : undefined,
 			mode_used: mode,
 			tuning: tuningSummary,
-			suggestions:
-				results.length === 0
-					? [
-							"Try mode 'fast' for exact symbols or mode 'semantic' for conceptual wording.",
-							"Run knowledge_status if the KB should contain this answer.",
-						]
-					: undefined,
+			suggestions: results.length === 0 ? EMPTY_RESULT_SUGGESTIONS : undefined,
 		};
 	}
 
@@ -2669,6 +2710,13 @@ export class KnowledgeEngine {
 		const { createWriteStream } = await import("node:fs");
 		const tempOutputPath = tempVectorPath(outputPath);
 		const stream = createWriteStream(tempOutputPath, { encoding: "utf-8" });
+		// A cancelled export can destroy the stream and unlink the temp file while the async open
+		// is still in flight; that late ENOENT would surface as an unhandled 'error' event.
+		// Capture it — real write/finish errors are already surfaced via writeLine/finishWriteStream.
+		let lateStreamError: Error | undefined;
+		stream.on("error", (error: Error) => {
+			lateStreamError ??= error;
+		});
 		let count = 0;
 		const header = JSON.stringify({
 			name: kb.name,

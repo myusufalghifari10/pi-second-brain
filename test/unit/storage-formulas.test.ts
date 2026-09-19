@@ -61,12 +61,12 @@ describe("formula storage schema (F3)", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("creates schema version 7 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
+	it("creates schema version 8 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-storage-formulas-"));
 		tempDirs.push(dir);
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
 
 			const tables = tableNames(db, "table");
 			expect(tables.has("formulas")).toBe(true);
@@ -80,6 +80,8 @@ describe("formula storage schema (F3)", () => {
 			const indexes = tableNames(db, "index");
 			expect(indexes.has("idx_formulas_kb_chunk")).toBe(true);
 			expect(indexes.has("idx_formulas_kb_norm")).toBe(true);
+			expect(indexes.has("idx_formulas_chunk")).toBe(true);
+			expect(indexes.has("idx_chunks_kb_file")).toBe(true);
 
 			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{
 				name: string;
@@ -123,7 +125,7 @@ describe("formula storage schema (F3)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 7 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
 			expect(tableNames(db, "table").has("formulas")).toBe(true);
 			expect(tableNames(db, "table").has("formulas_fts")).toBe(true);
 			expect(tableNames(db, "table").has("label_edges")).toBe(true);
@@ -139,6 +141,39 @@ describe("formula storage schema (F3)", () => {
 			// The re-run must be safe: v6 migration objects already exist in a fresh v6 database.
 			const kb = getKBByNameFromList(db);
 			expect(kb).toBeDefined();
+			const chunks = db.prepare("SELECT id FROM chunks").all() as Array<{ id: string }>;
+			expect(chunks).toHaveLength(1);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("migrates a v7 database to v8 additively (chunk backfill and kb+file indexes)", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-formulas-"));
+		tempDirs.push(dir);
+
+		// Build a fresh v8 database, then downgrade it to a v7-shaped one to exercise the path.
+		{
+			const db = openDatabase(dir);
+			try {
+				const kb = createKB(db, { name: "legacy", source_type: "text" });
+				insertChunks(db, kb.id, [chunkInsert()]);
+				db.exec(`
+					DROP INDEX IF EXISTS idx_formulas_chunk;
+					DROP INDEX IF EXISTS idx_chunks_kb_file;
+					UPDATE schema_version SET version = 7;
+				`);
+			} finally {
+				db.close();
+			}
+		}
+
+		const db = openDatabase(dir);
+		try {
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			const indexes = tableNames(db, "index");
+			expect(indexes.has("idx_formulas_chunk")).toBe(true);
+			expect(indexes.has("idx_chunks_kb_file")).toBe(true);
 			const chunks = db.prepare("SELECT id FROM chunks").all() as Array<{ id: string }>;
 			expect(chunks).toHaveLength(1);
 		} finally {
@@ -257,21 +292,22 @@ describe("formula sync API (F4)", () => {
 		expect(getKB(db, kb2Id)?.formula_index_built).toBe(0);
 	});
 
-	it("lists chunks with metadata for backfill across kbs", () => {
+	it("lists chunks scoped to the requested kb for backfill", () => {
 		const { kbId, kb2Id } = setup();
 		const metadata = JSON.stringify({ formulas: ["$$a + b$$"] });
 		const [chunk1] = insertChunks(db, kbId, [chunkInsert({ metadata_json: metadata })]);
 		const [chunk2] = insertChunks(db, kb2Id, [chunkInsert()]);
 
-		const rows = listChunksForFormulaBackfill(db);
-		expect(rows).toHaveLength(2);
-		const byId = new Map(rows.map((row) => [row.id, row]));
-		expect(byId.get(chunk1)).toEqual({ id: chunk1, kb_id: kbId, metadata_json: metadata });
-		expect(byId.get(chunk2)).toEqual({
-			id: chunk2,
-			kb_id: kb2Id,
-			metadata_json: JSON.stringify({ formulas: [E_MC2.raw] }),
-		});
+		const rows = listChunksForFormulaBackfill(db, kbId);
+		expect(rows).toEqual([{ id: chunk1, kb_id: kbId, metadata_json: metadata }]);
+		const otherRows = listChunksForFormulaBackfill(db, kb2Id);
+		expect(otherRows).toEqual([
+			{
+				id: chunk2,
+				kb_id: kb2Id,
+				metadata_json: JSON.stringify({ formulas: [E_MC2.raw] }),
+			},
+		]);
 	});
 
 	it("searches formulas via FTS with rank order and kb scoping", () => {

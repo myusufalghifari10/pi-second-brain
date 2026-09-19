@@ -13,14 +13,17 @@
 | multilingual-e5-base | 768 | 278 MB | 100+ 語言 | MIT | 很好 |
 | multilingual-e5-large | 1024 | 1.1 GB | 100+ 語言 | MIT | 最佳 |
 
-### 決策: multilingual-e5-small (quantized)
+### 決策: multilingual-e5-small
 
 理由:
 1. 384d — 和 MiniLM 相同維度，index 大小不變
 2. 100+ 語言含中文 — 使用者 zh-TW + 英文環境
-3. 32 MB quantized — 可接受下載量
-4. MIT — 商用無限制
-5. ONNX 版: [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
+3. MIT — 商用無限制
+4. ONNX 版: [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small)
+
+**實際載入合約 (frozen)**: 本地管線固定以 `dtype: "fp32"` 載入完整 `model.onnx`（約 118 MB），
+不是 32 MB 的 quantized 檔。精度不在 embeddingSignature 內，因此載入精度視為不可變合約；
+變更精度必須同步更新 signature 並強制重建向量。
 
 ---
 
@@ -119,7 +122,7 @@ For external reranking, set `PI_KNOWLEDGE_RERANKER=api:<model>` plus `PI_KNOWLED
 
 | 情境 | 方案 |
 |------|------|
-| Quantized 品質不足 | `PI_KNOWLEDGE_MODEL_QUALITY=full` (118 MB) |
+| 本地載入精度 | 固定 fp32 `model.onnx`（約 118 MB）— 這是實際的載入合約；沒有品質切換 env，精度不可在執行時變更 |
 | 零 native dep 需求 | Not currently supported by the Node bundle; local models run in an isolated worker |
 | 明確啟用 native idle dispose | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` |
 | OpenAI embedding API | `PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small` + `OPENAI_API_KEY` |

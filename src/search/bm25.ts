@@ -16,6 +16,20 @@ function quoteFtsTerm(term: string): string {
 	return `"${term.replace(/"/g, '""')}"`;
 }
 
+// Fail-open stays, but a broken FTS index must be observable: warn once per process per KB
+// scope before degrading to "no lexical hits" (which would otherwise also disable the KB's
+// vector leg in hybrid mode, silently).
+const warnedBrokenFtsScopes = new Set<string>();
+
+function warnBrokenFtsOnce(scope: string, kbId: string | undefined, error: unknown): void {
+	if (warnedBrokenFtsScopes.has(scope)) return;
+	warnedBrokenFtsScopes.add(scope);
+	console.warn(
+		`pi-knowledge: BM25 FTS search failed for knowledge base ${kbId ?? "<all>"}; ` +
+			`continuing without lexical results (${error instanceof Error ? error.message : String(error)})`,
+	);
+}
+
 function runSearch(db: Database.Database, ftsQuery: string, limit: number, kbId?: string): BM25Result[] {
 	if (kbId) {
 		return db
@@ -49,7 +63,8 @@ export function searchBM25(
 		const strict = runSearch(db, quotedTerms.join(" AND "), limit, kbId);
 		if (strict.length > 0 || terms.length === 1 || options.allowOrFallback === false) return strict;
 		return runSearch(db, quotedTerms.join(" OR "), limit, kbId);
-	} catch {
+	} catch (error) {
+		warnBrokenFtsOnce(kbId ?? "*", kbId, error);
 		return [];
 	}
 }

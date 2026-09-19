@@ -75,8 +75,10 @@ async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	const { pipeline, env } = await import("@huggingface/transformers");
 	configureEmbeddingTransformersEnv(env as TransformersEnv);
 	const createPipeline = pipeline as PipelineFactory;
+	// Local load contract is frozen at fp32 (see the comment beside CURRENT_EMBEDDING_MODEL in
+	// embedding/provider.ts): `quantized` is not read by @huggingface/transformers and dtype
+	// "fp32" selects model.onnx. Do not change precision without changing embeddingSignature.
 	const loaded = (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
-		quantized: true,
 		dtype: "fp32",
 	})) as FeatureExtractionPipeline;
 	embeddingPipeline = loaded;

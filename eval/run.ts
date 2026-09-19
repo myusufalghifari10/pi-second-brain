@@ -69,9 +69,13 @@ const FIXTURE_SOURCE_DIRS = ["test/eval/fixtures", "test/eval/fixtures-eval", "t
 const GOLDEN_DIR = "eval/golden";
 const DEFAULT_K = 5;
 
+// fail() throws instead of calling process.exit so any finally-cleanup further up the stack
+// (engine dispose + fixture dir removal in runFixture/runKb) still runs; main() turns the
+// failure into the same exit code the direct exit used to produce.
+class EvalFailure extends Error {}
+
 function fail(message: string): never {
-	console.error(`eval: ${message}`);
-	process.exit(2);
+	throw new EvalFailure(message);
 }
 
 function parseArgs(argv: string[]): { mode: "fixture" | "kb"; kbName?: string; k: number; verbose: boolean } {
@@ -317,6 +321,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
+	if (error instanceof EvalFailure) {
+		console.error(`eval: ${error.message}`);
+		process.exit(2);
+	}
 	console.error(`eval: run failed: ${error instanceof Error ? error.message : String(error)}`);
 	process.exit(2);
 });

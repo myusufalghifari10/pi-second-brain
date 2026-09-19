@@ -22,6 +22,12 @@ let disposeRequested = false;
 const idleWaiters: Array<() => void> = [];
 
 export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
+// Frozen local load contract: the model worker loads Xenova/multilingual-e5-small with
+// dtype "fp32" (the full model.onnx), mean pooling, and L2 normalization. These load options
+// produce the vector space that embeddingSignature stands for — dtype/precision is deliberately
+// NOT part of the signature, so changing the load precision would silently rotate every existing
+// KB's vector space without a mismatch warning. Treat the worker's load options as immutable;
+// a precision change requires updating embeddingSignature and forcing vector rebuilds.
 export const DEFAULT_LOCAL_EMBEDDING_MODEL = "multilingual-e5-small";
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -172,8 +178,22 @@ async function embedViaAPI(
 		const detail = await res.text().catch(() => "");
 		throw new Error(`OpenAI embedding API error: ${res.status}${detail ? ` ${detail.slice(0, 500)}` : ""}`);
 	}
-	const data = (await res.json()) as { data: Array<{ embedding: number[] }> };
-	return data.data.map((d) => new Float32Array(d.embedding));
+	const data: unknown = await res.json();
+	// Validate the response shape: a 200 with an unexpected body (proxy/error JSON) must fail
+	// with a diagnosable API error instead of "Cannot read properties of undefined".
+	if (typeof data !== "object" || data === null || !Array.isArray((data as { data?: unknown }).data)) {
+		throw new Error(`OpenAI embedding API returned an unexpected response body (status ${res.status})`);
+	}
+	return ((data as { data: unknown }).data as unknown[]).map((entry, index) => {
+		const embedding =
+			typeof entry === "object" && entry !== null && Array.isArray((entry as { embedding?: unknown }).embedding)
+				? (entry as { embedding: unknown[] }).embedding
+				: undefined;
+		if (!embedding || !embedding.every((value) => typeof value === "number" && Number.isFinite(value))) {
+			throw new Error(`OpenAI embedding API returned a non-numeric embedding at data[${index}] (status ${res.status})`);
+		}
+		return new Float32Array(embedding as number[]);
+	});
 }
 
 export async function embedTextsWithConfig(
