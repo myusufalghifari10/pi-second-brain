@@ -9,30 +9,51 @@ const checkTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const DEBOUNCE_MS = 2000;
 const POLL_MS = 2000;
 
-function scheduleUpdate(kbId: string, onUpdate: (kbId: string) => void): void {
-	const existing = debounceTimers.get(kbId);
-	if (existing) clearTimeout(existing);
+function scheduleUpdate(
+	kbId: string,
+	dirPath: string,
+	options: ScanOptions,
+	onUpdate: (kbId: string) => unknown,
+): void {
+	if (debounceTimers.has(kbId)) return; // a pending update already fires soon and re-scans current state
 	debounceTimers.set(
 		kbId,
 		setTimeout(() => {
 			debounceTimers.delete(kbId);
-			onUpdate(kbId);
+			void Promise.resolve(onUpdate(kbId)).then(
+				() => {
+					// Advance the stored snapshot ONLY after a successful update. While it runs, the
+					// stored pre-change snapshot keeps the poller re-detecting, so a change whose
+					// update was rejected (overlapping mutation) or coalesced into a stale in-flight
+					// run is re-triggered instead of being silently lost. On rejection the snapshot
+					// stays untouched and the next poll retries.
+					snapshots.set(kbId, scanSnapshot(dirPath, options));
+				},
+				() => {}, // rejection: keep the pre-change snapshot so the next poll re-detects
+			);
 		}, DEBOUNCE_MS),
 	);
 }
 
-function checkForChanges(kbId: string, dirPath: string, options: ScanOptions, onUpdate: (kbId: string) => void): void {
+function checkForChanges(
+	kbId: string,
+	dirPath: string,
+	options: ScanOptions,
+	onUpdate: (kbId: string) => unknown,
+): void {
 	const previous = snapshots.get(kbId) ?? new Map<string, string>();
 	const next = scanSnapshot(dirPath, options);
 	if (!snapshotsDiffer(previous, next)) return;
-	snapshots.set(kbId, next);
-	scheduleUpdate(kbId, onUpdate);
+	// Deliberately NOT storing `next` here: scheduleUpdate stores the fresh snapshot after the
+	// update settles. Storing it now would consume the change event even if the triggered update
+	// never scans it (rejected, or coalesced into a run whose scan predates the change).
+	scheduleUpdate(kbId, dirPath, options, onUpdate);
 }
 
 // Native FS events can storm (git checkout, npm install, build output). The expensive part is
 // scanSnapshot (readdir + stat per file), so it must run at most once per quiet DEBOUNCE_MS
 // window — schedule the CHECK, do the scan inside the timer.
-function scheduleCheck(kbId: string, dirPath: string, options: ScanOptions, onUpdate: (kbId: string) => void): void {
+function scheduleCheck(kbId: string, dirPath: string, options: ScanOptions, onUpdate: (kbId: string) => unknown): void {
 	const existing = checkTimers.get(kbId);
 	if (existing) clearTimeout(existing);
 	checkTimers.set(
@@ -67,7 +88,12 @@ function snapshotsDiffer(a: Map<string, string>, b: Map<string, string>): boolea
 	return false;
 }
 
-function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => void, options: ScanOptions = {}): void {
+function startPoller(
+	kbId: string,
+	dirPath: string,
+	onUpdate: (kbId: string) => unknown,
+	options: ScanOptions = {},
+): void {
 	snapshots.set(kbId, scanSnapshot(dirPath, options));
 	pollers.set(
 		kbId,
@@ -80,7 +106,7 @@ function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => 
 export function startWatcher(
 	kbId: string,
 	dirPath: string,
-	onUpdate: (kbId: string) => void,
+	onUpdate: (kbId: string) => unknown,
 	options: ScanOptions = {},
 ): void {
 	stopWatcher(kbId);

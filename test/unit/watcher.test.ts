@@ -50,4 +50,25 @@ describe("file watcher exclusions", () => {
 
 		expect(updates).toEqual(["kb"]);
 	});
+
+	it("retries a change whose update rejected instead of losing it", async () => {
+		const updates: string[] = [];
+		let failFirst = true;
+		startWatcher("kb", testDir, (kbId) => {
+			if (failFirst) {
+				failFirst = false;
+				return Promise.reject(new Error("overlapping mutation"));
+			}
+			updates.push(kbId);
+			return Promise.resolve();
+		});
+
+		writeFileSync(join(testDir, "src.ts"), "export const WatchSource = 7;");
+		await vi.advanceTimersByTimeAsync(2_500); // check fires → schedules update
+		await vi.advanceTimersByTimeAsync(2_500); // update #1 rejects → snapshot must stay pre-change
+		await vi.advanceTimersByTimeAsync(5_000); // poller re-detects the still-unindexed change → retry succeeds
+
+		// The rejected attempt must NOT consume the change: the poller re-fires and succeeds.
+		expect(updates).toEqual(["kb"]);
+	});
 });

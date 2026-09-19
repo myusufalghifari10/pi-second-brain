@@ -196,9 +196,7 @@ export default function (pi: ExtensionAPI) {
 					watcher.startWatcher(
 						kb.id,
 						kb.source_path,
-						(kbId) => {
-							engine.update(kbId).catch(() => {});
-						},
+						(kbId) => engine.update(kbId),
 						scanOptionsFromSourceOptions(kb.source_options),
 					);
 				}
@@ -425,22 +423,15 @@ export default function (pi: ExtensionAPI) {
 			);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
-				watcher.startWatcher(
-					kb.id,
-					kb.source_path,
-					(kbId) => {
-						engine.update(kbId).catch(() => {});
-					},
-					{
-						includeSuggestedText: include_suggested_text === true,
-						includePaths: Array.isArray(include_paths)
-							? include_paths.filter((item): item is string => typeof item === "string")
-							: undefined,
-						excludePaths: Array.isArray(exclude_paths)
-							? exclude_paths.filter((item): item is string => typeof item === "string")
-							: undefined,
-					},
-				);
+				watcher.startWatcher(kb.id, kb.source_path, (kbId) => engine.update(kbId), {
+					includeSuggestedText: include_suggested_text === true,
+					includePaths: Array.isArray(include_paths)
+						? include_paths.filter((item): item is string => typeof item === "string")
+						: undefined,
+					excludePaths: Array.isArray(exclude_paths)
+						? exclude_paths.filter((item): item is string => typeof item === "string")
+						: undefined,
+				});
 			}
 			return {
 				content: [
