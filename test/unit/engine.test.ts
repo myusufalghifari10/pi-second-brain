@@ -532,23 +532,30 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
-		it("coalesces overlapping updates for the same knowledge base", async () => {
+		it("rejects an overlapping same-KB update and preserves change detection", async () => {
 			const filePath = join(TEST_DIR, "coalesce.txt");
 			mkdirSync(TEST_DIR, { recursive: true });
 			writeFileSync(filePath, "Original coalesced update content about stable indexing.");
 			await engine.add(filePath, "Coalesced Update");
 			writeFileSync(filePath, "Changed CoalescedUpdateToken content about stable indexing.");
-			const secondUpdates: string[] = [];
 
 			const first = engine.update("Coalesced Update");
-			const second = engine.update("Coalesced Update", (message) => secondUpdates.push(message));
-			const [firstResult, secondResult] = await Promise.all([first, second]);
-
-			expect(secondUpdates).toContain('Update already running for "Coalesced Update"; waiting for the active update.');
-			expect(secondResult).toEqual(firstResult);
+			// Overlapping call fails honestly instead of borrowing the in-flight run's (stale-scan)
+			// result — that staleness is how a concurrent file change used to be lost.
+			await expect(engine.update("Coalesced Update")).rejects.toThrow(/already running/);
+			const firstResult = await first;
 			expect(firstResult.added).toBe(1);
 			expect(firstResult.removed).toBe(1);
 			expect(engine.list()[0].status).toBe("ready");
+
+			// After the in-flight run settles, a retry succeeds and indexes the current state.
+			writeFileSync(filePath, "Second CoalescedUpdateToken content about stable indexing.");
+			const third = await engine.update("Coalesced Update");
+			expect(third.unchanged).toBe(0);
+			expect(third.added).toBe(1);
+			expect(
+				(await engine.search("CoalescedUpdateToken", { mode: "fast", kb_id: "Coalesced Update" })).total_count,
+			).toBe(1);
 		});
 
 		it("blocks remove and clear while update is in flight", async () => {

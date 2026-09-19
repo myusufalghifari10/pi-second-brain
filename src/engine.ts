@@ -1605,8 +1605,12 @@ export class KnowledgeEngine {
 
 		const activeUpdate = this.activeUpdates.get(updateableKB.id);
 		if (activeUpdate) {
-			onProgress?.(`Update already running for "${updateableKB.name}"; waiting for the active update.`);
-			return activeUpdate;
+			// Overlapping same-KB updates must FAIL LOUDLY, not coalesce. A coalesced caller used to
+			// receive the in-flight update's promise whose file scan predates its own trigger — the
+			// watcher then treated the stale result as "change indexed" and lost it permanently.
+			// Rejecting keeps every consumer honest: the watcher retries after the in-flight run
+			// settles, and a human caller gets a truthful error instead of borrowed counters.
+			throw new Error(`An update for "${updateableKB.name}" is already running; retry after it finishes.`);
 		}
 
 		const updateRun = this.runExclusive(
