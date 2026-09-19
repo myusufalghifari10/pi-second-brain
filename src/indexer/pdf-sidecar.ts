@@ -308,7 +308,17 @@ async function runAdapter(
 	config: PdfSidecarConfig,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const outputDir = mkdtempSync(join(tmpdir(), "pdf-sidecar-"));
+	let outputDir: string;
+	try {
+		outputDir = mkdtempSync(join(tmpdir(), "pdf-sidecar-"));
+	} catch (error) {
+		// tmpdir unwritable (ENOSPC/EACCES) is not a PDF problem: keep the module's typed
+		// fail-open contract so the engine's unpdf fallback can engage instead of a hard add failure.
+		throw new SidecarError(
+			"spawn_failed",
+			`PDF sidecar could not create temp dir: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 	try {
 		const argv = buildAdapterArgv(filePath, outputDir, config, converter);
 		try {
@@ -328,7 +338,7 @@ async function runAdapter(
 }
 
 function execFailureInfo(error: unknown): {
-	code: string | undefined;
+	code: string | number | undefined;
 	killed: boolean;
 	stderrTail: string;
 	abortError: boolean;
@@ -343,7 +353,9 @@ function execFailureInfo(error: unknown): {
 				: "";
 	const abortError = err.name === "AbortError";
 	return {
-		code: typeof err.code === "string" ? err.code : undefined,
+		// execFile rejects with a NUMERIC code for normal non-zero exits (strings only for spawn
+		// errors like ENOENT) — accepting both keeps the primary sidecar diagnostic visible.
+		code: typeof err.code === "string" || typeof err.code === "number" ? err.code : undefined,
 		killed: err.killed === true,
 		stderrTail: stderrText.slice(-500),
 		abortError,
@@ -596,7 +608,9 @@ async function processSidecarImages(markdown: string, baseDir: string): Promise<
 				rewritten = rewritten.replace(full, ""); // missing target: drop the ref, fail-open
 				continue;
 			}
-			rewritten = rewritten.replace(full, `![${alt ?? ""}](${storePath})`);
+			// Replacer function: alt text/store path may contain `$&`-style patterns that a dynamic
+			// replacement STRING would expand, corrupting the rewritten image link.
+			rewritten = rewritten.replace(full, () => `![${alt ?? ""}](${storePath})`);
 			persisted.push({ alt: alt ?? "", storePath });
 		}
 		if (rewritten.trim() === "") continue; // image-only line whose refs all vanished

@@ -1887,9 +1887,22 @@ export class KnowledgeEngine {
 			onProgress?.(changesMessage);
 
 			replacementVectorPath = tempVectorPath(vectorPath);
-			const vectorWriter = openVectorWriter(replacementVectorPath);
-			const oldVectorReader = openVectorReader(vectorPath);
-			const newVectorReader = openVectorReader(addedVectorPath);
+			// Open all three handles inside a rethrow-guard: a failure on the second/third open
+			// (fd exhaustion, EACCES) must close the already-open handles instead of leaking them
+			// while the catch unlinks the replacement file (EPERM on Windows would mask the cause).
+			let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
+			let oldVectorReader: ReturnType<typeof openVectorReader> | undefined;
+			let newVectorReader: ReturnType<typeof openVectorReader> | undefined;
+			try {
+				vectorWriter = openVectorWriter(replacementVectorPath);
+				oldVectorReader = openVectorReader(vectorPath);
+				newVectorReader = openVectorReader(addedVectorPath);
+			} catch (error) {
+				vectorWriter?.close();
+				oldVectorReader?.close();
+				newVectorReader?.close();
+				throw error;
+			}
 			let finalChunkCount = 0;
 			const takeVectorIndex = (indexesByHash: Map<string, number[]>, hash: string): number | undefined => {
 				const indexes = indexesByHash.get(hash);

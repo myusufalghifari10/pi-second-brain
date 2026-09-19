@@ -322,6 +322,21 @@ describe("pdf sidecar", () => {
 			expect(existsSync(outputDir)).toBe(false);
 		});
 
+		it("reports the numeric exit code in the nonzero_exit message", async () => {
+			// execFile rejects with a NUMERIC err.code for normal non-zero exits; a string-only
+			// check rendered every real sidecar failure as "exited with code unknown".
+			const dir = makeTempDir();
+			const input = writeFixturePdf(dir, "paper.pdf", "mode fail");
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_CMD = `${NODE} ${FAKE_SIDECAR} {input} {output_dir}`;
+			process.env.FAKE_SIDECAR_MODE = "fail";
+			const error = await convertPdf(input, resolvePdfSidecarConfig()).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+			expect(error).toBeInstanceOf(SidecarError);
+			expect((error as SidecarError).message).toMatch(/exited with code [0-9]+/);
+		});
+
 		it("missing markdown output", async () => {
 			const { failure, outputDir } = await convertWithMode("no_output");
 			expect(failure).toBe("missing_output");
