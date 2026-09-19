@@ -896,12 +896,20 @@ export default function (pi: ExtensionAPI) {
 				throw new Error("Confirmation required: pass confirm=true for destructive clear");
 			}
 			const { engine, watcher } = await ensureInitialized();
-			// stopAllWatchers in finally: a mid-loop rmSync failure in clear() must not leave
-			// watchers of already-deleted KBs scanning deleted trees forever.
+			// Watchers of deleted KBs must stop even on a mid-loop rmSync failure — but a throw
+			// BEFORE any deletion (active mutation, disposing) leaves every KB alive: detaching
+			// their watchers would silently disable file watching for healthy KBs. So on failure,
+			// stop only watchers whose KB no longer exists.
+			const idsBeforeClear = new Set(engine.list().map((kb) => kb.id));
 			try {
 				engine.clear();
-			} finally {
 				watcher.stopAllWatchers();
+			} catch (error) {
+				const survivingIds = new Set(engine.list().map((kb) => kb.id));
+				for (const id of idsBeforeClear) {
+					if (!survivingIds.has(id)) watcher.stopWatcher(id);
+				}
+				throw error;
 			}
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };
 		},

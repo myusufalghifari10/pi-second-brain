@@ -1898,9 +1898,15 @@ export class KnowledgeEngine {
 				oldVectorReader = openVectorReader(vectorPath);
 				newVectorReader = openVectorReader(addedVectorPath);
 			} catch (error) {
-				vectorWriter?.close();
-				oldVectorReader?.close();
-				newVectorReader?.close();
+				// Best-effort close: a close() throw (ENOSPC/EIO) must not skip the remaining closes
+				// nor mask the original open error that is about to propagate.
+				for (const handle of [vectorWriter, oldVectorReader, newVectorReader]) {
+					try {
+						handle?.close();
+					} catch {
+						/* keep the original open error */
+					}
+				}
 				throw error;
 			}
 			let finalChunkCount = 0;
@@ -1959,9 +1965,23 @@ export class KnowledgeEngine {
 					}
 				}
 			} finally {
-				oldVectorReader?.close();
-				newVectorReader?.close();
-				vectorWriter.close();
+				// Each close is best-effort: a close() throw here would otherwise REPLACE the in-flight
+				// error (e.g. a user cancellation mid-rebuild) with an unrelated EIO/ENOSPC.
+				try {
+					oldVectorReader?.close();
+				} catch {
+					/* preserve the in-flight error */
+				}
+				try {
+					newVectorReader?.close();
+				} catch {
+					/* preserve the in-flight error */
+				}
+				try {
+					vectorWriter?.close();
+				} catch {
+					/* preserve the in-flight error */
+				}
 			}
 			renameSync(replacementVectorPath, vectorPath);
 			replacementVectorPath = undefined;
@@ -2077,7 +2097,10 @@ export class KnowledgeEngine {
 		const db = this.db;
 		const { mode = "hybrid", kb_id, filters, diversity = "balanced" } = options;
 		const rawOffset = options.offset ?? 0;
-		const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+		// Upper-bound the offset: an absurd finite offset (accepted by the schema) would inflate
+		// candidateLimit past the chunk count and materialize the whole vector file in memory —
+		// exactly what the query-time memory rule forbids. Sane pagination is unaffected.
+		const offset = Number.isFinite(rawOffset) ? Math.min(Math.max(0, Math.trunc(rawOffset)), 10_000) : 0;
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const queryTokens = tokenizeForSimilarity(query);

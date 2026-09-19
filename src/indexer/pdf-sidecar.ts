@@ -287,7 +287,9 @@ function buildAdapterArgv(
 		const parts = config.cmdTemplate
 			.split(/\s+/)
 			.filter(Boolean)
-			.map((part) => part.replaceAll("{input}", filePath).replaceAll("{output_dir}", outputDir));
+			// Replacer functions: paths can contain `$&`-style sequences that a replacement STRING
+			// would expand, corrupting the spawned argv.
+			.map((part) => part.replaceAll("{input}", () => filePath).replaceAll("{output_dir}", () => outputDir));
 		const [file, ...args] = parts;
 		if (!file) throw new SidecarError("spawn_failed", "PI_KNOWLEDGE_PDF_SIDECAR_CMD is empty after trimming");
 		return { file, args, outputDir };
@@ -506,7 +508,9 @@ function buildOcrArgv(imagePath: string, outputDir: string, config: OcrConfig): 
 	const parts = config.cmdTemplate
 		.split(/\s+/)
 		.filter(Boolean)
-		.map((part) => part.replaceAll("{input}", imagePath).replaceAll("{output_dir}", outputDir));
+		// Replacer functions: paths can contain `$&`-style sequences that a replacement STRING
+		// would expand, corrupting the spawned argv.
+		.map((part) => part.replaceAll("{input}", () => imagePath).replaceAll("{output_dir}", () => outputDir));
 	const [file, ...args] = parts;
 	if (!file) return defaultArgv;
 	return { file, args };
