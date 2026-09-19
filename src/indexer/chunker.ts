@@ -776,14 +776,16 @@ export function chunkMarkdown(
 			continue;
 		}
 		// Display math is a protected atomic unit: a `#`-leading line inside a `$$ … $$` block or
-		// `\[ … \]` must not split the section (same bug class as fenced code). Open only when
-		// the `$$` delimiter count on the line is odd (unterminated), so `$$x$$` stays inline.
-		if ((line.match(/\$\$/g) ?? []).length % 2 === 1) {
+		// `\[ … \]` must not split the section (same bug class as fenced code). Open ONLY on a
+		// line-leading delimiter (aligned with the segmenter's DISPLAY_OPEN_RE in math-text.ts)
+		// that is unterminated on its own line, so prose mentioning `$$` or inline `\[` cannot
+		// latch math state and swallow every later heading.
+		if (/^\s*\$\$/.test(line) && (line.match(/\$\$/g) ?? []).length % 2 === 1) {
 			openDisplayMath = true;
 			sectionLines.push(line);
 			continue;
 		}
-		if (line.includes("\\[") && !line.includes("\\]")) {
+		if (/^\s*\\\[/.test(line) && !line.includes("\\]")) {
 			openDisplayMath = true;
 			sectionLines.push(line);
 			continue;

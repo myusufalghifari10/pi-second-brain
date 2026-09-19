@@ -634,6 +634,27 @@ describe("chunkMarkdown fence-aware headings", () => {
 		expect(chunks[0].content).toContain("$$\n# \\text{this line starts with hash inside display math}\nE = mc^2");
 		expect(chunks[0].content).toContain("\\int_0^\\infty");
 	});
+
+	it("does not latch math state on prose mentioning $$ or inline bracket notation", () => {
+		const md = [
+			"## Before",
+			"",
+			"First section paragraph that is long enough to pass the fifty character minimum threshold.",
+			"In prose you can write: use `$$` to open a display block, or an inline \\[a+b\\] span.",
+			"# The $$ operator is a heading here, not math — this line must split the section.",
+			"Body paragraph after the fake heading, still long enough to pass the minimum chunk size.",
+			"## After",
+			"",
+			"Closing paragraph that is also long enough to pass the fifty character minimum threshold.",
+		].join("\n");
+		const chunks = chunkMarkdown(md, "prose-money.md");
+		// Prose `$$`/`\[` must not latch math state: the `#`-leading line IS a real heading and
+		// splits the section — yielding Before | The $$ operator | After (NOT one merged lump).
+		expect(chunks).toHaveLength(3);
+		expect(JSON.parse(chunks[0].metadata_json).breadcrumb).toBe("Before");
+		expect(JSON.parse(chunks[1].metadata_json).breadcrumb).toContain("The $$ operator");
+		expect(JSON.parse(chunks[2].metadata_json).breadcrumb).toContain("After");
+	});
 });
 
 describe("chunker line coordinates", () => {

@@ -88,7 +88,16 @@ export async function rerankViaApi(
 		const data = (await response.json()) as unknown;
 		const results = valueAtPath(data, config.resultsPath);
 		if (!Array.isArray(results)) throw new Error("Invalid reranker API response: results field is not an array");
-		const ranked = results.map((result) => mapApiResult(result, candidates, config));
+		// A misbehaving endpoint may repeat an index; dedupe so deep mode never emits the same
+		// chunk twice (the retrieval legs dedupe via seen-sets, so must the rerank output).
+		const seen = new Set<string>();
+		const ranked = results
+			.map((result) => mapApiResult(result, candidates, config))
+			.filter((result) => {
+				if (seen.has(result.chunkId)) return false;
+				seen.add(result.chunkId);
+				return true;
+			});
 		if (config.scoreDirection === "asc") ranked.sort((a, b) => a.score - b.score);
 		else ranked.sort((a, b) => b.score - a.score);
 		return ranked.slice(0, topK);

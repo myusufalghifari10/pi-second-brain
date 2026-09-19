@@ -2928,7 +2928,6 @@ export class KnowledgeEngine {
 			await prepareEmbeddingForShutdown();
 			await prepareRerankerForShutdown();
 		}
-		shutdownModelWorker();
 		this.db?.close();
 		this.db = null;
 	}

@@ -1119,7 +1119,7 @@ export function searchFormulasFTS(
 				`SELECT f.chunk_id as chunk_id, f.normalized as normalized
 				 FROM formulas_fts JOIN formulas f ON formulas_fts.rowid = f.rowid
 				 WHERE formulas_fts MATCH ? AND f.kb_id = ?
-				 ORDER BY bm25(formulas_fts) LIMIT ?`,
+				 ORDER BY bm25(formulas_fts), f.rowid LIMIT ?`,
 			)
 			.all(safeQuery, kbId, safeLimit) as Array<{ chunk_id: string; normalized: string }>;
 		// rank is a 1-based position in best-first order.

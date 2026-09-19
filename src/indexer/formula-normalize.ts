@@ -236,8 +236,9 @@ export function extractQueryFormulas(query: string): QueryFormulas {
 		if (isBareTexFormula(remainder)) addFormula(formulas, remainder);
 		// L4 F2 (spec §3.1): text segments that full-match the molecular pattern become one
 		// chem formula (the plain query H2SO4 works). Bare-TeX keeps L3 precedence;
-		// cap/reject semantics are unchanged.
-		else if (isMolecularFormula(remainder)) addFormula(formulas, remainder);
+		// cap/reject semantics are unchanged. The chem route mirrors the normalize path's
+		// MAX_FORMULA_CHARS cap so oversized query segments never reach the 118-alternative RE.
+		else if (remainder.length <= MAX_FORMULA_CHARS && isMolecularFormula(remainder)) addFormula(formulas, remainder);
 		cleanedParts.push(remainder);
 	}
 	if (formulas.length === 0) return { formulas: [], cleanedQuery: query };

@@ -613,6 +613,12 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("keeps sidecar failures with 'abort' in stderr classified as failures, not user cancels", async () => {
+			// Pin the sidecar path deterministically: without an installed marker/docling the real
+			// detectSidecar returns "none" and the mock would never be consulted (vacuous pass).
+			vi.stubEnv(
+				"PI_KNOWLEDGE_PDF_SIDECAR_CMD",
+				`${process.execPath} ${join(import.meta.dirname, "../fixtures/fake-sidecar.mjs")} {input} {output_dir}`,
+			);
 			// Real parseable PDF: the mocked sidecar fails, the unpdf fallback must succeed.
 			const filePath = join(TEST_DIR, "sidecrash-about-authentication.pdf");
 			copyFileSync(FIXTURE_PDF, filePath);
@@ -637,6 +643,23 @@ describe("KnowledgeEngine", () => {
 			} finally {
 				db.close();
 			}
+		});
+
+		it("classifies a genuinely aborted sidecar conversion as a user cancel", async () => {
+			vi.stubEnv(
+				"PI_KNOWLEDGE_PDF_SIDECAR_CMD",
+				`${process.execPath} ${join(import.meta.dirname, "../fixtures/fake-sidecar.mjs")} {input} {output_dir}`,
+			);
+			const filePath = join(TEST_DIR, "aborted-conversion-about-authentication.pdf");
+			copyFileSync(FIXTURE_PDF, filePath);
+			convertPdfMock.mockImplementationOnce(async () => {
+				throw new SidecarError("aborted", "PDF conversion aborted before start: sidecrash.pdf");
+			});
+
+			// The cancellation propagates out of add() and the brand-new KB rolls back entirely.
+			await expect(engine.add(filePath, "Aborted PDF")).rejects.toThrow(/aborted/);
+			const kb = engine.list().find((candidate) => candidate.name === "Aborted PDF");
+			expect(kb).toBeUndefined();
 		});
 
 		it("fails cleanly when the embedding config turns broken before an update starts", async () => {
