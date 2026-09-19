@@ -84,10 +84,13 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase, signal?: Ab
 		return result; // text KBs or missing source — no diagnostics possible
 	}
 
-	// Scan current source files
+	// Scan current source files. statSync sits inside the try: a source deleted between the
+	// existsSync check and the stat must degrade to "no diagnostics" (fail-open), never crash
+	// the whole diagnose/doctor report.
 	const currentFiles = new Set<string>();
-	const isDirectory = statSync(kb.source_path).isDirectory();
+	let isDirectory = false;
 	try {
+		isDirectory = statSync(kb.source_path).isDirectory();
 		if (isDirectory) {
 			const skipped = createSkippedScanStats();
 			for (const file of iterateScannableFiles(

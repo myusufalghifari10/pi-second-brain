@@ -180,11 +180,18 @@ async function embedViaAPI(
 	}
 	const data: unknown = await res.json();
 	// Validate the response shape: a 200 with an unexpected body (proxy/error JSON) must fail
-	// with a diagnosable API error instead of "Cannot read properties of undefined".
-	if (typeof data !== "object" || data === null || !Array.isArray((data as { data?: unknown }).data)) {
-		throw new Error(`OpenAI embedding API returned an unexpected response body (status ${res.status})`);
+	// with a diagnosable API error instead of "Cannot read properties of undefined". The length
+	// check matters on the query path: a short/empty data array would surface as an undefined
+	// vector and crash the search instead of failing with a diagnosable API error.
+	const entries = (data as { data?: unknown }).data;
+	if (typeof data !== "object" || data === null || !Array.isArray(entries) || entries.length !== texts.length) {
+		throw new Error(
+			`OpenAI embedding API returned an unexpected response body (status ${res.status}${
+				Array.isArray(entries) ? `, ${entries.length} vectors for ${texts.length} inputs` : ""
+			})`,
+		);
 	}
-	return ((data as { data: unknown }).data as unknown[]).map((entry, index) => {
+	return (entries as unknown[]).map((entry, index) => {
 		const embedding =
 			typeof entry === "object" && entry !== null && Array.isArray((entry as { embedding?: unknown }).embedding)
 				? (entry as { embedding: unknown[] }).embedding

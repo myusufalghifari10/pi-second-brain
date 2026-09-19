@@ -47,9 +47,14 @@ export function openVectorWriter(path: string): VectorWriter {
 		},
 		close(): void {
 			if (closed) return;
-			writeHeader();
-			closeSync(fd);
-			closed = true;
+			try {
+				writeHeader();
+			} finally {
+				// The header writeSync can throw on ENOSPC/EIO; the fd must close regardless or it
+				// leaks for the process lifetime (engine error paths re-close best-effort).
+				closed = true;
+				closeSync(fd);
+			}
 		},
 	};
 }
