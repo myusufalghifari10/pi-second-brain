@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -335,6 +344,20 @@ describe("pdf sidecar", () => {
 			);
 			expect(error).toBeInstanceOf(SidecarError);
 			expect((error as SidecarError).message).toMatch(/exited with code [0-9]+/);
+		});
+
+		it("keeps `$&`-style sequences in paths literal in the spawned argv", async () => {
+			// A replacement STRING would expand $& to the whole match, corrupting the path; the
+			// replacer-function template must pass it through verbatim.
+			const trickyDir = join(makeTempDir(), "a$&b");
+			mkdirSync(trickyDir, { recursive: true });
+			const input = writeFixturePdf(trickyDir, "paper.pdf", "dollar path");
+			process.env.PI_KNOWLEDGE_PDF_SIDECAR_CMD = `${NODE} ${FAKE_SIDECAR} {input} {output_dir}`;
+			process.env.FAKE_SIDECAR_ARGV = join(trickyDir, "argv.json");
+
+			await convertPdf(input, resolvePdfSidecarConfig()).catch(() => undefined); // outcome irrelevant
+			const argv = JSON.parse(readFileSync(process.env.FAKE_SIDECAR_ARGV ?? "", "utf-8")) as string[];
+			expect(argv[0]).toBe(input); // input path survived byte-for-byte (mirror = argv.slice(2))
 		});
 
 		it("missing markdown output", async () => {

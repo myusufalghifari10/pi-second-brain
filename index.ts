@@ -492,7 +492,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default comes from search profile/env)" })),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
-			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
+			offset: Type.Optional(Type.Number({ description: "Pagination offset (capped at 10000)" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 			path_pattern: Type.Optional(
 				Type.String({ description: "Filter by file path substring (for example src/engine.ts)" }),

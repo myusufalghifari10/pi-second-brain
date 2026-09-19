@@ -558,6 +558,18 @@ describe("KnowledgeEngine", () => {
 			).toBe(1);
 		});
 
+		it("caps an absurd offset at 10000 with an explicit warning", async () => {
+			writeFileSync(join(TEST_DIR, "cap.txt"), "Offset cap content about authentication tokens.");
+			await engine.add(join(TEST_DIR, "cap.txt"), "Offset Cap");
+
+			const capped = await engine.search("OffsetCap", { mode: "fast", kb_id: "Offset Cap", offset: 20_000 });
+			expect(capped.warnings?.some((w) => w.includes("offset capped at 10000"))).toBe(true);
+			// Non-finite offset falls back to the first page without a warning.
+			const nan = await engine.search("OffsetCap", { mode: "fast", kb_id: "Offset Cap", offset: Number.NaN });
+			expect(nan.results.length).toBeGreaterThanOrEqual(1);
+			expect(nan.warnings?.some((w) => w.includes("offset capped")) ?? false).toBe(false);
+		});
+
 		it("blocks remove and clear while update is in flight", async () => {
 			const sourcePath = join(TEST_DIR, "update-guard.txt");
 			writeFileSync(sourcePath, "Initial update guard content about authentication tokens.");

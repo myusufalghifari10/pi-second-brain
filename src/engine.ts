@@ -23,6 +23,7 @@ import {
 	isReadableTextFile,
 	isSupportedDocumentFile,
 	iterateScannableFiles,
+	MAX_SOURCE_FILE_SIZE,
 	preTokenizeForFTS,
 	type ScannableFile,
 	type ScanOptions,
@@ -878,6 +879,13 @@ async function extractSourceFileContent(
 		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
 	}
 	throwIfAborted(signal);
+	// Same byte cap as the directory scanner and the URL path: a multi-GB single file must fail
+	// loudly instead of being read fully into memory.
+	if (statSync(filePath).size > MAX_SOURCE_FILE_SIZE) {
+		throw new Error(
+			`File exceeds the ${Math.round(MAX_SOURCE_FILE_SIZE / (1024 * 1024))} MB ingestion cap: ${filePath} — split it or add its directory instead`,
+		);
+	}
 	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
 }
 
@@ -1179,6 +1187,14 @@ async function finishWriteStream(stream: WriteStream): Promise<void> {
 		stream.end();
 	});
 }
+
+/**
+ * Thrown when an update aborts by design while the index remains intact (e.g. the
+ * zero-readable-files wipe guard). The catch path restores the KB's prior status instead of
+ * flipping it to "error": the condition is transient (broken mount/offline drive) and the KB
+ * must stay searchable with its existing index.
+ */
+class UpdateAbortedError extends Error {}
 
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
@@ -1864,7 +1880,7 @@ export class KnowledgeEngine {
 			// deletion. Abort non-cancellably and keep the index intact — intentional emptying
 			// should go through knowledge_remove.
 			if (kb.source_type === "directory" && scannedFiles === 0 && kb.chunk_count > 0) {
-				throw new Error(
+				throw new UpdateAbortedError(
 					`Update aborted: source directory "${kb.source_path}" yielded no readable files while the KB holds ${kb.chunk_count} chunks. Refusing to wipe the index — if emptying it is intentional, remove the KB instead.`,
 				);
 			}
@@ -1909,6 +1925,7 @@ export class KnowledgeEngine {
 				}
 				throw error;
 			}
+			let closeError: unknown;
 			let finalChunkCount = 0;
 			const takeVectorIndex = (indexesByHash: Map<string, number[]>, hash: string): number | undefined => {
 				const indexes = indexesByHash.get(hash);
@@ -1965,24 +1982,28 @@ export class KnowledgeEngine {
 					}
 				}
 			} finally {
-				// Each close is best-effort: a close() throw here would otherwise REPLACE the in-flight
-				// error (e.g. a user cancellation mid-rebuild) with an unrelated EIO/ENOSPC.
+				// Closes are best-effort and never REPLACE an in-flight error (e.g. a user cancellation
+				// mid-rebuild) with an unrelated EIO/ENOSPC. The captured close failure is rethrown
+				// after the finally: swallowing it on the SUCCESS path would publish a
+				// placeholder-header vector file (count=0) and silently disable semantic search for
+				// the KB until the next update's self-heal.
 				try {
 					oldVectorReader?.close();
-				} catch {
-					/* preserve the in-flight error */
+				} catch (error) {
+					closeError ??= error;
 				}
 				try {
 					newVectorReader?.close();
-				} catch {
-					/* preserve the in-flight error */
+				} catch (error) {
+					closeError ??= error;
 				}
 				try {
 					vectorWriter?.close();
-				} catch {
-					/* preserve the in-flight error */
+				} catch (error) {
+					closeError ??= error;
 				}
 			}
+			if (closeError !== undefined) throw closeError;
 			renameSync(replacementVectorPath, vectorPath);
 			replacementVectorPath = undefined;
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
@@ -2041,7 +2062,7 @@ export class KnowledgeEngine {
 				deleteChunksByIds(this.db, insertedChunkIds);
 				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 			}
-			updateKBStatus(this.db, kb.id, isCancellationError(e) ? kb.status : "error");
+			updateKBStatus(this.db, kb.id, isCancellationError(e) || e instanceof UpdateAbortedError ? kb.status : "error");
 			finishIndexingJob(
 				this.db,
 				kb.id,
@@ -2097,10 +2118,16 @@ export class KnowledgeEngine {
 		const db = this.db;
 		const { mode = "hybrid", kb_id, filters, diversity = "balanced" } = options;
 		const rawOffset = options.offset ?? 0;
+		const warnings: string[] = [];
 		// Upper-bound the offset: an absurd finite offset (accepted by the schema) would inflate
 		// candidateLimit past the chunk count and materialize the whole vector file in memory —
-		// exactly what the query-time memory rule forbids. Sane pagination is unaffected.
-		const offset = Number.isFinite(rawOffset) ? Math.min(Math.max(0, Math.trunc(rawOffset)), 10_000) : 0;
+		// exactly what the query-time memory rule forbids. Sane pagination is unaffected; past
+		// the cap the caller gets a repeat window plus an explicit warning instead of silence.
+		let offset = Number.isFinite(rawOffset) ? Math.max(0, Math.trunc(rawOffset)) : 0;
+		if (offset > 10_000) {
+			offset = 10_000;
+			warnings.push("offset capped at 10000; results repeat past the cap");
+		}
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const queryTokens = tokenizeForSimilarity(query);
@@ -2109,7 +2136,6 @@ export class KnowledgeEngine {
 		// whole path — and the results — byte-identical to pre-L3.
 		const queryFormulas = extractQueryFormulas(query);
 
-		const warnings: string[] = [];
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
 		if (kb_id && !selectedKB) throw new Error(`Knowledge base not found: ${kb_id}`);
 		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);

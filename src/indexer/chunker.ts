@@ -23,6 +23,9 @@ type ChunkMetadata = Record<string, ChunkMetadataValue>;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
+/** Byte cap for one ingestion read — shared with the engine's single-file read path. */
+export const MAX_SOURCE_FILE_SIZE = MAX_FILE_SIZE;
+
 const DOCUMENT_EXTENSIONS: Record<string, true> = { ".doc": true, ".docx": true, ".pdf": true };
 
 const BINARY_EXTENSIONS: Record<string, true> = {
@@ -389,18 +392,6 @@ export function* iterateScannedFiles(
 			addSkipped(skipped, { path: file.relPath, reason: "unreadable", size: file.size });
 		}
 	}
-}
-
-export async function iterateScannedFilesAsync(
-	dirPath: string,
-	onFile: (file: ScannedFile) => Promise<void> | void,
-	skipped: ScanResult["skipped"] = createSkippedScanStats(),
-	options: ScanOptions = {},
-): Promise<ScanResult["skipped"]> {
-	for (const file of iterateScannedFiles(dirPath, skipped, options)) {
-		await onFile(file);
-	}
-	return skipped;
 }
 
 export function walkDir(dirPath: string, options: ScanOptions = {}): ScannedFile[] {
