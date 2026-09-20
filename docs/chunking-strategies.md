@@ -96,7 +96,7 @@ function isBinary(path: string): boolean {
 
 | 語言 | 切分單位 | Metadata |
 |------|---------|----------|
-| TS/JS | class, interface, type, function, exported arrow/function-valued variables, class field methods | `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, `exported`, `ast_path`, `start_line`, `end_line` |
+| TS/JS | class, interface, type, function, namespaces/modules (members chunked and indexed), exported arrow/function-valued variables, class field methods | `language`, `symbol`, `symbol_kind`, `scope`, `parent_symbol`, `signature`, `exported`, `ast_path`, `start_line`, `end_line` |
 | Python | class, function, method | 同上，並保留 decorators |
 | Go/Rust/Java | function/method/type/class/interface declarations supported by tree-sitter grammar | 同上 |
 
