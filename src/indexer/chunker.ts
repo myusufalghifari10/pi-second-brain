@@ -431,11 +431,16 @@ export function preTokenizeForFTS(content: string): string {
 	// rewriteUnitWordVariants runs BEFORE rewriteUnitTokens so spelled-out unit words
 	// ("kilometers") and symbol forms ("km") converge on one token stream at BOTH index
 	// and query time, and so spelled forms feed the cdot rule symmetrically.
+	// Thousands-separator strip runs FIRST so "2,056" and "2056" canonicalize to one token
+	// stream on both sides (FTS unicode61 splits the comma form into [2, 056], which can
+	// never match the query token 2056). Decimal dots are intentionally NOT stripped:
+	// 11.94 and 1194 are different quantities; the query side protects digit.dot.digit.
 	return rewriteUnitTokens(
 		rewriteUnitWordVariants(
 			rewriteFormulaTokens(
 				canonicalizeMathText(
 					content
+						.replace(/(\d),(?=\d{3}\b)/g, "$1")
 						.replace(/([a-z])([A-Z])/g, "$1 $2")
 						.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
 						.replace(/([a-zA-Z])(\d)/g, "$1 $2")

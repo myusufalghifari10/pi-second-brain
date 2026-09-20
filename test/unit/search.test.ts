@@ -7,6 +7,7 @@ import { saveVectors } from "../../src/embedding/vectors.ts";
 import { contentHash, preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { searchBM25 } from "../../src/search/bm25.ts";
 import { weightedScoreFusion } from "../../src/search/fusion.ts";
+import { tokenizeForSearch } from "../../src/search/query.ts";
 import { searchVector, searchVectorFile } from "../../src/search/vector.ts";
 import { createKB, getChunkIdsByKB, insertChunks, openDatabase } from "../../src/storage/sqlite.ts";
 
@@ -127,6 +128,52 @@ describe("search pipeline", () => {
 			expect(r.results).toHaveLength(1);
 			expect(r.results[0].chunkId).toBe(chunkIds[1]);
 			expect(r.vectorsByChunkId.size).toBe(1);
+		});
+	});
+
+	describe("numeric token symmetry (index vs query)", () => {
+		function seedNumeric(texts: string[]) {
+			const kb = createKB(db, { name: "numeric-symmetry", source_type: "text" });
+			insertChunks(
+				db,
+				kb.id,
+				texts.map((t) => ({
+					content_hash: contentHash(t),
+					content: t,
+					content_tokenized: preTokenizeForFTS(t),
+					file_path: "n.md",
+					file_type: "text",
+					start_line: 1,
+					end_line: 1,
+					metadata_json: "{}",
+				})),
+			);
+		}
+
+		it("keeps decimals whole on the query side, mirroring the index", () => {
+			expect([...tokenizeForSearch("11.94")]).toContain("11.94");
+		});
+
+		it("hyphen-digit and space-digit queries produce identical token sets", () => {
+			expect([...tokenizeForSearch("shell-2")].sort()).toEqual([...tokenizeForSearch("shell 2")].sort());
+			expect([...tokenizeForSearch("shell-2")]).toContain("2");
+		});
+
+		it("query 11.94 hits a doc containing 11.94", () => {
+			seedNumeric(["The fused kernel takes 11.94 microseconds total."]);
+			expect(searchBM25(db, "11.94").length).toBe(1);
+		});
+
+		it("shell-2 and shell 2 queries hit the same doc", () => {
+			seedNumeric(["see shell-2 analysis for details."]);
+			expect(searchBM25(db, "shell-2").length).toBe(1);
+			expect(searchBM25(db, "shell 2").length).toBe(1);
+		});
+
+		it("2056 matches a doc containing 2,056", () => {
+			seedNumeric(["2,056 tokens on the leaderboard."]);
+			expect(searchBM25(db, "2056").length).toBe(1);
+			expect(searchBM25(db, "2,056").length).toBe(1);
 		});
 	});
 
