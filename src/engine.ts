@@ -32,6 +32,7 @@ import {
 import { extractQueryFormulas, type NormalizedFormula, normalizeFormula } from "./indexer/formula-normalize.ts";
 import { resolveLabelTarget } from "./indexer/label-resolve.ts";
 import { convertPdf, detectSidecar, resolvePdfSidecarConfig, SidecarError } from "./indexer/pdf-sidecar.ts";
+import { couplePdfTableNarrative } from "./indexer/pdf-tables.js";
 import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
@@ -909,7 +910,10 @@ async function extractPdfSourceFileContent(
 	throwIfAborted(signal);
 	const { text } = await extractText(new Uint8Array(buf));
 	throwIfAborted(signal);
-	return { content: normalizeExtractedText(text), fileType: "pdf" };
+	// Table-narrative coupling (PDF-only): unpdf flattens tables to bare lines, so table chunks
+	// would never carry the sentence that introduces them. Markdown (sidecar) keeps headings and
+	// is deliberately left untouched.
+	return { content: couplePdfTableNarrative(normalizeExtractedText(text)), fileType: "pdf" };
 }
 
 async function extractSourceFileContent(

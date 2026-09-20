@@ -26,6 +26,13 @@ const FIXTURE_PDF = fileURLToPath(new URL("../fixtures/fixture-paper.pdf", impor
 
 const convertPdfMock = vi.hoisted(() => vi.fn());
 
+const couplePdfTableNarrativeMock = vi.hoisted(() => vi.fn((text: string) => text));
+
+vi.mock("../../src/indexer/pdf-tables.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/indexer/pdf-tables.ts")>();
+	return { ...actual, couplePdfTableNarrative: couplePdfTableNarrativeMock };
+});
+
 vi.mock("mammoth", () => ({
 	extractRawText: mammothMock.extractRawText,
 }));
@@ -801,6 +808,35 @@ describe("KnowledgeEngine", () => {
 			} finally {
 				db.close();
 			}
+		});
+
+		it("couples table narrative on the unpdf path (spy invoked, KB ready)", async () => {
+			// Seed WITHOUT the sidecar env: detectSidecar returns "none", so the unpdf fallback
+			// extracts the text — and that path (and only that path) must run the coupling.
+			const filePath = join(TEST_DIR, "unpdf-coupling.pdf");
+			copyFileSync(FIXTURE_PDF, filePath);
+			couplePdfTableNarrativeMock.mockClear();
+			await engine.add(filePath, "Unpdf Coupling");
+			expect(couplePdfTableNarrativeMock).toHaveBeenCalledTimes(1);
+			expect(couplePdfTableNarrativeMock).toHaveBeenCalledWith(expect.any(String));
+			expect(engine.list().find((candidate) => candidate.name === "Unpdf Coupling")?.status).toBe("ready");
+		});
+
+		it("does not couple table narrative on the sidecar markdown path (spy untouched)", async () => {
+			// Sidecar markdown already keeps heading provenance — the coupling must never touch it.
+			vi.stubEnv(
+				"PI_KNOWLEDGE_PDF_SIDECAR_CMD",
+				`${process.execPath} ${join(import.meta.dirname, "../fixtures/fake-sidecar.mjs")} {input} {output_dir}`,
+			);
+			convertPdfMock.mockResolvedValue({
+				markdown: "# Converted\n\nMarker markdown body about authentication tokens.\n",
+				converter: "marker",
+			});
+			const filePath = join(TEST_DIR, "sidecar-nocouple.pdf");
+			copyFileSync(FIXTURE_PDF, filePath);
+			couplePdfTableNarrativeMock.mockClear();
+			await engine.add(filePath, "Sidecar NoCouple");
+			expect(couplePdfTableNarrativeMock).not.toHaveBeenCalled();
 		});
 
 		it("classifies a mid-flight user cancel (Error Cancelled) as cancelled, not failed", async () => {
