@@ -108,4 +108,29 @@ describe("file watcher exclusions", () => {
 		await vi.advanceTimersByTimeAsync(10_000); // fully quiet afterwards: no retry loop
 		expect(calls).toBe(before);
 	});
+
+	it("skips a queued second update whose diff the in-flight run already consumed", async () => {
+		// F4: a poller tick while update #1 is in flight re-detects against the STORED pre-change
+		// snapshot and queues update #2. Update #1 settles and stores the consumed snapshot, so
+		// firing #2 would be a pure no-op ({added:0,removed:0,unchanged:N}) — the timer callback
+		// must re-diff and skip it. pendingRetry entries would still fire (force-fire contract).
+		const deferreds: Array<{ resolve: () => void }> = [];
+		let calls = 0;
+		startWatcher("kb", testDir, () => {
+			calls++;
+			if (calls === 1) return new Promise<void>((resolve) => deferreds.push({ resolve })); // update #1 in flight
+			return Promise.resolve();
+		});
+
+		writeFileSync(join(testDir, "src.ts"), "export const WatchSource = 10;");
+		await vi.advanceTimersByTimeAsync(2_500); // check (t=2) detects the change → schedules update #1
+		await vi.advanceTimersByTimeAsync(2_500); // t=4: update #1 starts (deferred, in flight)
+		expect(calls).toBe(1);
+		await vi.advanceTimersByTimeAsync(1_500); // t=6: poller re-detects against the stale stored snapshot → queues update #2
+		deferreds[0]?.resolve(); // update #1 settles → stores the consumed (post-change) snapshot
+		await vi.advanceTimersByTimeAsync(0); // flush settle microtasks
+		await vi.advanceTimersByTimeAsync(4_000); // queued update #2 fires → re-diff identical → SKIPPED
+
+		expect(calls).toBe(1);
+	});
 });

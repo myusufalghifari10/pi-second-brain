@@ -16,6 +16,7 @@ export interface DiagnosticResult {
 	status_age_ms: number;
 	last_progress_age_ms: number;
 	stuck_indexing: boolean;
+	vector_file_missing: boolean; // chunk_count > 0 but the KB's vector file is gone
 	stale_files: string[]; // files modified after indexing
 	orphan_files: string[]; // chunks referencing deleted files
 	coverage_percent: number; // indexed files / total scannable files
@@ -58,7 +59,12 @@ function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
 }
 
-export function diagnoseKB(db: Database.Database, kb: KnowledgeBase, signal?: AbortSignal): DiagnosticResult {
+export function diagnoseKB(
+	db: Database.Database,
+	kb: KnowledgeBase,
+	signal?: AbortSignal,
+	vectorsDir?: string,
+): DiagnosticResult {
 	const statusAgeMs = Date.now() - kb.updated_at;
 	const job = getIndexingJob(db, kb.id);
 	const lastProgressAgeMs = job?.status === "running" ? Date.now() - job.last_progress_at : statusAgeMs;
@@ -69,6 +75,11 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase, signal?: Ab
 		status_age_ms: statusAgeMs,
 		last_progress_age_ms: lastProgressAgeMs,
 		stuck_indexing: kb.status === "indexing" && lastProgressAgeMs > staleIndexingMs(),
+		// Vector-file existence is independent of source scanning, so it is checked even for
+		// text KBs or missing sources (both early-return below). Without a vectors dir there is
+		// nothing to check — never flag (fail-open).
+		vector_file_missing:
+			kb.chunk_count > 0 && vectorsDir !== undefined && !existsSync(join(vectorsDir, `${kb.id}.bin`)),
 		stale_files: [],
 		orphan_files: [],
 		coverage_percent: 100,

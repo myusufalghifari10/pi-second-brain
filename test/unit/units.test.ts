@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { canonicalizeMathText, MATH_UNICODE_MAP } from "../../src/indexer/math-text.ts";
-import { rewriteUnitTokens, UNIT_TOKENS } from "../../src/indexer/units.ts";
+import {
+	rewriteUnitTokens,
+	rewriteUnitWordVariants,
+	UNIT_TOKENS,
+	UNIT_WORD_VARIANTS,
+} from "../../src/indexer/units.ts";
+import { tokenizeForSearch } from "../../src/search/query.ts";
 
 // Spec §3.2 surface forms paired with their token-space form (preTokenizeForFTS output).
 // Every token of every surface form must be a UNIT_TOKEN so any cdot written between two
@@ -146,5 +152,54 @@ describe("unit glyph folds (§3.2 paired vectors)", () => {
 	it("° degree sign U+00B0 folds to degree (pre-existing anchor)", () => {
 		expect(MATH_UNICODE_MAP["\u00B0"]).toBe("degree");
 		expect(preTokenizeForFTS("45\u00B0 angle")).toBe("45 degree angle");
+	});
+});
+
+describe("unit word-variant canonicalization (D3: spelled-out ≡ symbol)", () => {
+	it("rewrites every bounded word form at BOTH index and query time (symmetric)", () => {
+		for (const [word, symbol] of UNIT_WORD_VARIANTS) {
+			expect(preTokenizeForFTS(`3 ${word}`), word).toBe(`3 ${symbol}`);
+			expect(tokenizeForSearch(`3 ${word}`), word).toEqual(tokenizeForSearch(`3 ${symbol}`));
+		}
+	});
+
+	it("km and kilometers (and British kilometres) converge on one token stream (D3 probe vector)", () => {
+		expect(preTokenizeForFTS("5 km")).toBe("5 km");
+		expect(preTokenizeForFTS("3 kilometers")).toBe("3 km");
+		expect(preTokenizeForFTS("3 kilometre")).toBe("3 km");
+		expect(tokenizeForSearch("kilometers")).toEqual(tokenizeForSearch("km"));
+	});
+
+	it("is case-insensitive so mixed-case prose stays symmetric (Kilometers ≡ km)", () => {
+		expect(preTokenizeForFTS("5 Kilometers")).toBe("5 km");
+		expect(preTokenizeForFTS("30 SECONDS")).toBe("30 s");
+		expect(tokenizeForSearch("Kilometers")).toEqual(tokenizeForSearch("km"));
+	});
+
+	it("word boundaries keep prose intact (kilometerstone never rewrites)", () => {
+		expect(preTokenizeForFTS("kilometerstone")).toBe("kilometerstone");
+		expect(preTokenizeForFTS("Meganometers")).toBe("Meganometers");
+		expect(preTokenizeForFTS("The quick brown fox")).toBe("The quick brown fox");
+	});
+
+	it("spelled forms feed the cdot rule symmetrically (second·meter ≡ s·m ≡ s m)", () => {
+		expect(preTokenizeForFTS("second·meter")).toBe("s m");
+		expect(preTokenizeForFTS("s·m")).toBe("s m");
+	});
+
+	it("query side rewrites before filtering (spelled ≡ symbol token sets; single-char targets stay dropped)", () => {
+		expect(tokenizeForSearch("kilometers")).toEqual(new Set(["km"]));
+		expect(tokenizeForSearch("milliseconds")).toEqual(tokenizeForSearch("ms"));
+		expect(tokenizeForSearch("minutes")).toEqual(tokenizeForSearch("min"));
+		// Single-char rewrite targets (hours → h) hit the pre-existing length-1 noise filter:
+		// letter/digit splits shard symbol runs (H2SO4 → h 2 so 4), so bare single-char terms
+		// stay excluded from FTS queries by design; both spelled and symbol queries degrade
+		// identically (empty), keeping the sides symmetric.
+		expect(tokenizeForSearch("3 hours")).toEqual(tokenizeForSearch("3 h"));
+	});
+
+	it("rewriteUnitWordVariants returns input unchanged (same reference) when no word variant occurs", () => {
+		const input = "plain prose tokens only";
+		expect(rewriteUnitWordVariants(input)).toBe(input);
 	});
 });

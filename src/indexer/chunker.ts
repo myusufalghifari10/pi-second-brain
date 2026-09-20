@@ -16,7 +16,7 @@ import {
 	splitProtectedSegments,
 } from "./math-text.ts";
 import { extractSymbols } from "./symbols.ts";
-import { rewriteUnitTokens } from "./units.ts";
+import { rewriteUnitTokens, rewriteUnitWordVariants } from "./units.ts";
 
 type ChunkMetadataValue = string | number | boolean | string[] | number[] | boolean[] | null | undefined;
 type ChunkMetadata = Record<string, ChunkMetadataValue>;
@@ -423,16 +423,21 @@ export function preTokenizeForFTS(content: string): string {
 	// Canonicalization MUST run after the existing chain (canonicalize-last): running it
 	// first would let the letter-digit split shred freshly minted composite tokens
 	// (pow2 → "pow 2", with "2" dropped by the length filter).
+	// rewriteUnitWordVariants runs BEFORE rewriteUnitTokens so spelled-out unit words
+	// ("kilometers") and symbol forms ("km") converge on one token stream at BOTH index
+	// and query time, and so spelled forms feed the cdot rule symmetrically.
 	return rewriteUnitTokens(
-		canonicalizeMathText(
-			content
-				.replace(/([a-z])([A-Z])/g, "$1 $2")
-				.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-				.replace(/([a-zA-Z])(\d)/g, "$1 $2")
-				.replace(/(\d)([a-zA-Z])/g, "$1 $2")
-				.replace(/([\u4e00-\u9fff\u3400-\u4dbf])/g, " $1 ")
-				.replace(/\s+/g, " ")
-				.trim(),
+		rewriteUnitWordVariants(
+			canonicalizeMathText(
+				content
+					.replace(/([a-z])([A-Z])/g, "$1 $2")
+					.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+					.replace(/([a-zA-Z])(\d)/g, "$1 $2")
+					.replace(/(\d)([a-zA-Z])/g, "$1 $2")
+					.replace(/([\u4e00-\u9fff\u3400-\u4dbf])/g, " $1 ")
+					.replace(/\s+/g, " ")
+					.trim(),
+			),
 		),
 	);
 }

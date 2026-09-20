@@ -2656,7 +2656,7 @@ export class KnowledgeEngine {
 		const db = this.db;
 		return listKBs(db).map((kb) => {
 			throwIfAborted(signal);
-			return diagnoseKB(db, kb, signal);
+			return diagnoseKB(db, kb, signal, join(this.knowledgeDir, "vectors"));
 		});
 	}
 
@@ -2738,6 +2738,16 @@ export class KnowledgeEngine {
 					kb_name: diagnostic.kb_name,
 					message: "Knowledge base is in error state and is skipped by search.",
 					action: "Run knowledge_remove and knowledge_add to rebuild it from the source.",
+					action_code: "rebuild_kb",
+				});
+			}
+			if (diagnostic.vector_file_missing) {
+				issues.push({
+					severity: "blocking",
+					kb_name: diagnostic.kb_name,
+					message: "Vector file is missing; semantic search is degraded for this KB.",
+					action:
+						"Run knowledge_update to regenerate the vector file, or knowledge_remove and knowledge_add to rebuild the KB.",
 					action_code: "rebuild_kb",
 				});
 			}
@@ -2855,9 +2865,9 @@ export class KnowledgeEngine {
 		// A cancelled export can destroy the stream and unlink the temp file while the async open
 		// is still in flight; that late ENOENT would surface as an unhandled 'error' event.
 		// Capture it — real write/finish errors are already surfaced via writeLine/finishWriteStream.
-		let lateStreamError: Error | undefined;
+		let _lateStreamError: Error | undefined;
 		stream.on("error", (error: Error) => {
-			lateStreamError ??= error;
+			_lateStreamError ??= error;
 		});
 		let count = 0;
 		const header = JSON.stringify({

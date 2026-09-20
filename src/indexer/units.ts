@@ -71,6 +71,69 @@ export const UNIT_TOKENS: ReadonlySet<string> = new Set([
 // ("N cdot m cdot s" → "N m s"). Non-unit neighbors leave the cdot untouched ("a cdot b",
 // "5 cdot kg" — 5 is not a unit token, per spec). No cdot ⇒ returned unchanged (same
 // reference), keeping non-unit content byte-identical (plan S6).
+// Word-variant canonicalization (D3): maps spelled-out unit names to their symbol form so
+// "3 kilometers" and "3 km" share one FTS token stream. It runs inside preTokenizeForFTS,
+// the ONE pipeline shared by index-side content_tokenized and query-side tokenizeForSearch,
+// so both sides rewrite symmetrically. Frozen bounded map with lowercase keys; matching is
+// word-boundary exact and case-insensitive — the index-side token stream preserves case
+// while the query side lowercases only AFTER preTokenizeForFTS, so a case-sensitive map
+// would be asymmetric ("5 Kilometers" indexed unrewritten, query "Kilometers" rewritten).
+// Singular AND plural forms both rewrite; \b keeps prose intact ("kilometerstone" never
+// matches because "stone" continues the word run).
+export const UNIT_WORD_VARIANTS: ReadonlyMap<string, string> = new Map([
+	["kilometer", "km"],
+	["kilometers", "km"],
+	["kilometre", "km"],
+	["kilometres", "km"],
+	["meter", "m"],
+	["meters", "m"],
+	["metre", "m"],
+	["metres", "m"],
+	["centimeter", "cm"],
+	["centimeters", "cm"],
+	["millimeter", "mm"],
+	["millimeters", "mm"],
+	["kilogram", "kg"],
+	["kilograms", "kg"],
+	["gram", "g"],
+	["grams", "g"],
+	["milligram", "mg"],
+	["milligrams", "mg"],
+	["second", "s"],
+	["seconds", "s"],
+	["millisecond", "ms"],
+	["milliseconds", "ms"],
+	["minute", "min"],
+	["minutes", "min"],
+	["hour", "h"],
+	["hours", "h"],
+	["hertz", "hz"],
+	["kilobyte", "kb"],
+	["kilobytes", "kb"],
+	["megabyte", "mb"],
+	["megabytes", "mb"],
+	["gigabyte", "gb"],
+	["gigabytes", "gb"],
+]);
+
+// Alternation is longest-first so the regex never commits to a shorter variant before the
+// longer one at the same start position ("kilometers" before "kilometer").
+const UNIT_WORD_VARIANT_SOURCE = [...UNIT_WORD_VARIANTS.keys()].sort((a, b) => b.length - a.length).join("|");
+
+// Stateless fast-path gate (no /g flag ⇒ .test cannot advance lastIndex): most content has no
+// spelled-out unit, and this keeps the common case allocation-free.
+const UNIT_WORD_VARIANT_FAST_TEST = new RegExp(`\\b(?:${UNIT_WORD_VARIANT_SOURCE})\\b`, "i");
+const UNIT_WORD_VARIANT_RE = new RegExp(`\\b(?:${UNIT_WORD_VARIANT_SOURCE})\\b`, "gi");
+
+// Rewrites every spelled-out unit word to its symbol form ("3 kilometers" → "3 km"). The
+// match is replaced via its lowercased map lookup, so "Kilometers" and "KILOMETERS" rewrite
+// too. Runs BEFORE rewriteUnitTokens so spelled forms also feed the cdot rule symmetrically
+// ("second·meter" → "s cdot m" → "s m", matching "s·m").
+export function rewriteUnitWordVariants(text: string): string {
+	if (!UNIT_WORD_VARIANT_FAST_TEST.test(text)) return text;
+	return text.replace(UNIT_WORD_VARIANT_RE, (word) => UNIT_WORD_VARIANTS.get(word.toLowerCase()) ?? word);
+}
+
 export function rewriteUnitTokens(tokenized: string): string {
 	if (!tokenized.includes("cdot")) return tokenized;
 	const tokens = tokenized.split(" ");

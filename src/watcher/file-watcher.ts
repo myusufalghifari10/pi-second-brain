@@ -24,6 +24,17 @@ function scheduleUpdate(
 		kbId,
 		setTimeout(() => {
 			debounceTimers.delete(kbId);
+			// A poller tick can queue a second update while the first is in-flight, re-detecting
+			// against the STORED pre-change snapshot. By the time this timer fires, the in-flight
+			// run has usually consumed that diff and stored a fresh snapshot — firing would be a
+			// pure no-op ({added:0,removed:0,unchanged:N}). Re-diff before invoking: identical
+			// ⇒ skip. pendingRetry entries ALWAYS fire (round-11 change-loss guarantee); a null
+			// scan or a missing stored snapshot fails open (the no-op cannot be proven).
+			const stored = snapshots.get(kbId);
+			if (!pendingRetry.has(kbId) && stored) {
+				const fresh = scanSnapshot(dirPath, options);
+				if (fresh !== null && !snapshotsDiffer(stored, fresh)) return;
+			}
 			void Promise.resolve(onUpdate(kbId)).then(
 				() => {
 					// A rejected overlap during this run means the run's file scan predates changes

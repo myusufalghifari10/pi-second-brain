@@ -1678,6 +1678,22 @@ describe("KnowledgeEngine", () => {
 			expect(report.issues.some((issue) => issue.severity === "blocking")).toBe(true);
 			expect(report.issues.some((issue) => issue.action.includes("remove and rebuild"))).toBe(true);
 		});
+
+		it("doctor flags a missing vector file with a rebuild action", async () => {
+			await engine.add("Vector file diagnostics content about MissingVectorDoctor recovery.", "VecDoctor");
+			// Healthy store: the vector file exists, so the new check must not fire.
+			expect(engine.doctor().issues.some((issue) => issue.message.includes("Vector file is missing"))).toBe(false);
+
+			const [{ id }] = engine.list();
+			rmSync(join(TEST_DIR, "vectors", `${id}.bin`));
+
+			const report = engine.doctor();
+			const issue = report.issues.find((item) => item.message.includes("Vector file is missing"));
+			expect(issue?.severity).toBe("blocking");
+			expect(issue?.action_code).toBe("rebuild_kb");
+			expect(issue?.kb_name).toBe("VecDoctor");
+			expect(report.health_score).toBeLessThan(100);
+		});
 	});
 
 	describe("import/export", () => {

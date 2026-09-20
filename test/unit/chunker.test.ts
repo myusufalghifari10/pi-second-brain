@@ -728,7 +728,7 @@ describe("chunker line coordinates", () => {
 	});
 
 	it("anchors provenance to the oversized block itself, not the section end", () => {
-		const oversizedPara = ("oversized prefix " + "z".repeat(6500)).slice(0, 6800);
+		const oversizedPara = `oversized prefix ${"z".repeat(6500)}`.slice(0, 6800);
 		const md = [
 			"## H",
 			"",

@@ -10,7 +10,7 @@ import { KnowledgeEngine } from "../../src/engine.ts";
 // semantic search for the KB until the next update's self-heal.
 
 let failWriterClose = false;
-let writerInstances = 0;
+let _writerInstances = 0;
 
 vi.mock("../../src/embedding/vectors.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../../src/embedding/vectors.ts")>();
@@ -18,7 +18,7 @@ vi.mock("../../src/embedding/vectors.ts", async (importOriginal) => {
 		...actual,
 		openVectorWriter(path: string) {
 			const writer = actual.openVectorWriter(path);
-			writerInstances++;
+			_writerInstances++;
 			if (!failWriterClose) return writer;
 			return {
 				append: (vectors: Float32Array[]) => writer.append(vectors),
@@ -38,7 +38,7 @@ describe("update fails loudly when the vector writer cannot close", () => {
 		TEST_DIR = mkdtempSync(join(tmpdir(), "pk-test-writer-close-"));
 		engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
-		writerInstances = 0;
+		_writerInstances = 0;
 		failWriterClose = false;
 	});
 
