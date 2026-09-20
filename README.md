@@ -1,6 +1,12 @@
-# pi-knowledge
+# pi-second-brain
 
 Local-first RAG knowledge base for Pi and OMP coding agents.
+
+> **pi-second-brain** is an independently maintained, heavily hardened fork of
+> [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) (v0.10.1 base). It adds math/chemistry/unit-aware
+> chunking, LaTeX-formula retrieval, theorem/label graphs, PDF sidecar (Marker/Docling) + OCR ingestion, an
+> eval harness, and 22 rounds of adversarial audit fixes. The runtime namespace is kept for compatibility:
+> env vars stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
 
 Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi and [OMP](https://omp.sh/) can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
 
