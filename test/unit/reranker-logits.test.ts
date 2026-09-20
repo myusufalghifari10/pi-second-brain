@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { rerankWithSingleRawLogit, scoreSingleRawLogit } from "../../src/search/reranker-logits.ts";
+import { rerankWithSingleRawLogit, scorePairLogits, scoreSingleRawLogit } from "../../src/search/reranker-logits.ts";
 
 describe("raw-logit reranker scoring", () => {
 	it("returns the only logit as the rerank score", () => {
@@ -31,5 +31,41 @@ describe("raw-logit reranker scoring", () => {
 			truncation: true,
 		});
 		expect(model).toHaveBeenCalledWith({ input_ids: [1, 2, 3], attention_mask: [1, 1, 1] });
+	});
+});
+
+describe("pair scoring for the default reranker path", () => {
+	it("maps a single relevance logit through sigmoid (cross-encoder convention)", () => {
+		expect(scorePairLogits({ data: Float32Array.from([0]) }, "Xenova/ms-marco-MiniLM-L-4-v2")).toBe(0.5);
+		expect(scorePairLogits({ data: Float32Array.from([2]) }, "Xenova/ms-marco-MiniLM-L-4-v2")).toBeCloseTo(0.8808, 4);
+		expect(scorePairLogits({ data: Float32Array.from([-3]) }, "Xenova/ms-marco-MiniLM-L-4-v2")).toBeLessThan(0.05);
+	});
+
+	it("falls back to softmax-max for genuine multi-class classifiers (pipeline semantics)", () => {
+		// softmax([1,3]): exps = [e^-2, 1], max prob = 1/(1+e^-2)
+		expect(scorePairLogits({ data: Float32Array.from([1, 3]) }, "example/two-label")).toBeCloseTo(0.8808, 4);
+	});
+
+	it("rejects non-finite pair logits", () => {
+		expect(() => scorePairLogits({ data: [Number.POSITIVE_INFINITY] }, "example/reranker")).toThrow(/non-finite/);
+	});
+
+	it("scores with a custom scorer through the shared pair machinery (default-path regression)", async () => {
+		// The DEFAULT HF path (PI_KNOWLEDGE_RERANKER_RAW_LOGITS unset) must still tokenize real
+		// query/pair inputs — the pre-fix text-classification pipeline fed `{text, text_pair}` as
+		// one "text" and produced constant scores.
+		const tokenizer = vi.fn(() => ({ input_ids: [4, 5] }));
+		const model = vi.fn(async () => ({ logits: { data: Float32Array.from([1]) } }));
+
+		await expect(
+			rerankWithSingleRawLogit(
+				{ text: "q", text_pair: "doc" },
+				tokenizer,
+				model,
+				"Xenova/ms-marco-MiniLM-L-4-v2",
+				scorePairLogits,
+			),
+		).resolves.toEqual([{ score: 1 / (1 + Math.exp(-1)) }]);
+		expect(tokenizer).toHaveBeenCalledWith("q", { text_pair: "doc", padding: true, truncation: true });
 	});
 });

@@ -366,6 +366,10 @@ function detectRegion(lines: string[], i: number, mode: ScanMode): DetectedRegio
 		}
 
 		if (LATEX_DISPLAY_OPEN_RE.test(line)) {
+			// A same-line close makes the region single-line atomic (mirror of the $$ branch): the
+			// multi-line scan below starts at i + 1, so without this check a one-liner \[ x \]
+			// would swallow prose up to some unrelated later \].
+			if (findUnescaped(line, "\\]", 0) !== -1) return { kind: "math", endIdx: i };
 			for (let j = i + 1; j < lines.length; j++) {
 				if (lines[j].includes("\\]")) return { kind: "math", endIdx: j };
 			}

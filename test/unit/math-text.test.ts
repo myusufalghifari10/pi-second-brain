@@ -170,6 +170,21 @@ describe("splitProtectedSegments", () => {
 		expect(segments.filter((s) => s.kind === "math")).toHaveLength(1);
 	});
 
+	it("single-line \\[ x \\] is atomic and does not swallow following prose", () => {
+		// Pre-fix: the close scan started at i+1, so a one-liner \[ x \] latched onto the NEXT
+		// unrelated \] and pulled all intervening prose into the math segment.
+		const text = ["\\[ x \\]", "Prose after the one-liner.", "More \\] bait here."].join("\n");
+		const segments = splitProtectedSegments(text, "markdown");
+		const math = segments.filter((s) => s.kind === "math");
+		expect(math).toHaveLength(1);
+		const prose = segments
+			.filter((s) => s.kind === "text")
+			.map((s) => s.text)
+			.join("\n");
+		expect(prose).toContain("Prose after the one-liner.");
+		expect(prose).toContain("bait");
+	});
+
 	it("segments are contiguous and line numbers reconstruct the input exactly", () => {
 		const text = [
 			"# Title",

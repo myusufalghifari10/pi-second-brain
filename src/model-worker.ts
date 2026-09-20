@@ -8,7 +8,13 @@ import {
 	rerankerCacheKey,
 	resolveRerankerConfig,
 } from "./search/reranker-config.ts";
-import { type RawLogitModel, type RawLogitTokenizer, rerankWithSingleRawLogit } from "./search/reranker-logits.ts";
+import {
+	type RawLogitModel,
+	type RawLogitTokenizer,
+	rerankWithSingleRawLogit,
+	scorePairLogits,
+	scoreSingleRawLogit,
+} from "./search/reranker-logits.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 type FeatureExtractionPipeline = (
@@ -89,32 +95,24 @@ async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerP
 	const key = rerankerCacheKey(config);
 	if (rerankerPipeline?.key === key) return rerankerPipeline.pipe;
 
-	if (config.rawLogits) {
-		const { AutoTokenizer, AutoModelForSequenceClassification, env } = await import("@huggingface/transformers");
-		const transformersEnv = env as TransformersEnv;
-		configureTransformersEnv(transformersEnv);
-		transformersEnv.remoteHost = config.remoteHost ?? DEFAULT_RERANKER_REMOTE_HOST;
-		transformersEnv.remotePathTemplate = config.remotePathTemplate ?? DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE;
-		const loadOpts: Record<string, unknown> = { revision: config.revision };
-		if (config.dtype) loadOpts.dtype = config.dtype;
-		const tokenizer = (await AutoTokenizer.from_pretrained(config.model, loadOpts)) as RawLogitTokenizer;
-		const model = (await AutoModelForSequenceClassification.from_pretrained(config.model, loadOpts)) as RawLogitModel;
-		const pipe: RerankerPipeline = (input) => rerankWithSingleRawLogit(input, tokenizer, model, config.model);
-		rerankerPipeline = { key, pipe };
-		return pipe;
-	}
-
-	const { pipeline, env } = await import("@huggingface/transformers");
+	const { AutoTokenizer, AutoModelForSequenceClassification, env } = await import("@huggingface/transformers");
 	const transformersEnv = env as TransformersEnv;
 	configureTransformersEnv(transformersEnv);
 	transformersEnv.remoteHost = config.remoteHost ?? DEFAULT_RERANKER_REMOTE_HOST;
 	transformersEnv.remotePathTemplate = config.remotePathTemplate ?? DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE;
-	const createPipeline = pipeline as PipelineFactory;
-	const options: Record<string, unknown> = { revision: config.revision };
-	if (config.dtype) options.dtype = config.dtype;
-	const loaded = (await createPipeline("text-classification", config.model, options)) as RerankerPipeline;
-	rerankerPipeline = { key, pipe: loaded };
-	return loaded;
+	const loadOpts: Record<string, unknown> = { revision: config.revision };
+	if (config.dtype) loadOpts.dtype = config.dtype;
+	// Pair inputs are tokenized DIRECTLY (AutoTokenizer text_pair): the text-classification
+	// pipeline has NO text_pair support — it would feed `{text, text_pair}` to the tokenizer as
+	// a single "text", producing empty input_ids and constant/garbage scores. The raw-logits
+	// flag only changes the SCORING (raw logit vs sigmoid/softmax), never the tokenization.
+	const tokenizer = (await AutoTokenizer.from_pretrained(config.model, loadOpts)) as RawLogitTokenizer;
+	const model = (await AutoModelForSequenceClassification.from_pretrained(config.model, loadOpts)) as RawLogitModel;
+	const scoreLogits = config.rawLogits ? scoreSingleRawLogit : scorePairLogits;
+	const pipe: RerankerPipeline = (input) =>
+		rerankWithSingleRawLogit(input, tokenizer, model, config.model, scoreLogits);
+	rerankerPipeline = { key, pipe };
+	return pipe;
 }
 
 async function handleEmbed(request: EmbedRequest): Promise<number[][]> {
