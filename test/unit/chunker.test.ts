@@ -718,12 +718,13 @@ describe("chunker line coordinates", () => {
 
 	it("keeps mid-section start lines exact after blank-line reconstruction", () => {
 		const filler = (word: string) => `${word} ${word} ${word.repeat(700).trim()}`.slice(0, 3600).trimEnd();
-		const md = ["# H", "", filler("alpha"), "", filler("gamma")].join("\n");
+		// k = 2 blanks after the heading: pre-fix hard-coded reconstruction reported [3, 5]
+		// (drifted one line early); the real paragraphs live on lines 4 and 6. (k = 1 is the
+		// fixed point of both implementations and cannot discriminate a regression.)
+		const md = ["# H", "", "", filler("alpha"), "", filler("gamma")].join("\n");
 		const chunks = chunkMarkdown(md, "gap.md");
 		const mid = chunks.filter((chunk) => chunk.start_line > 1);
-		// para1 lives on line 3, para2 on line 5 (k = 1 blank after the heading): the old
-		// hard-coded 2-line reconstruction drifted every mid-section chunk one line early.
-		expect(mid.map((chunk) => chunk.start_line)).toEqual([3, 5]);
+		expect(mid.map((chunk) => chunk.start_line)).toEqual([4, 6]);
 	});
 
 	it("anchors provenance to the oversized block itself, not the section end", () => {

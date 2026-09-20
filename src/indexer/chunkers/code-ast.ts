@@ -408,9 +408,25 @@ function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | und
 	return undefined;
 }
 
+// Index of the header-terminating character for brace-less (Python) headers: the FIRST
+// colon at parenthesis/bracket depth 0. Colons inside the parameter list (annotations,
+// lambda defaults) sit at depth >= 1; body colons (dict literals) come after the header.
+function depthZeroColonEnd(text: string): number {
+	let depth = 0;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "(" || ch === "[") depth++;
+		else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+		else if (ch === ":" && depth === 0) return i;
+	}
+	return -1;
+}
+
 function signatureFromText(text: string, kind: StructureKind): string | undefined {
 	const normalized = text.trim();
 	if (!normalized) return undefined;
+	const isPython =
+		normalized.startsWith("def ") || normalized.startsWith("async def ") || normalized.startsWith("class ");
 	const bodyMarkers =
 		kind === "function" || kind === "method" || kind === "constructor" || kind === "destructor"
 			? normalized.startsWith("def ") || normalized.startsWith("async def ")
@@ -418,26 +434,17 @@ function signatureFromText(text: string, kind: StructureKind): string | undefine
 				: ["{", "=>"]
 			: ["{"];
 	let end = normalized.length;
-	for (const marker of bodyMarkers) {
-		if (marker === ":") {
-			// Python: the header-terminating colon is the FIRST colon at parenthesis/bracket
-			// depth 0. first-colon-anywhere cuts annotated params (def f(x: int):); colons inside
-			// the parameter list (annotations, lambda defaults) all sit at depth >= 1, and body
-			// colons (dict literals) come after the terminator.
-			let depth = 0;
-			for (let i = 0; i < normalized.length; i++) {
-				const ch = normalized[i];
-				if (ch === "(" || ch === "[") depth++;
-				else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
-				else if (ch === ":" && depth === 0) {
-					end = Math.min(end, i + 1); // include the terminating colon in the signature
-					break;
-				}
-			}
-			continue;
+	if (isPython) {
+		// Python def AND class headers both terminate at a depth-0 colon; there is no "{" to
+		// cut at, so the brace-less path would otherwise flatten the entire class body into
+		// the signature (and then into symbol.text).
+		const colon = depthZeroColonEnd(normalized);
+		if (colon > 0) end = Math.min(end, colon + 1); // include the terminating colon
+	} else {
+		for (const marker of bodyMarkers) {
+			const index = normalized.indexOf(marker);
+			if (index > 0) end = Math.min(end, marker === "=>" ? index + marker.length : index);
 		}
-		const index = normalized.indexOf(marker);
-		if (index > 0) end = Math.min(end, marker === "=>" ? index + marker.length : index);
 	}
 	const firstLine = normalized.slice(0, end).replace(/\s+/g, " ").trim();
 	return firstLine.length > 280 ? `${firstLine.slice(0, 277)}...` : firstLine;

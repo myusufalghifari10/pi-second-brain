@@ -476,8 +476,26 @@ describe("AST code analysis", () => {
 		const analysis = await analyzeCodeWithAST(code, "src/scale.py", "python");
 		const fn = analysis.symbols.find((symbol) => symbol.name === "scale");
 		// first-colon matching cut annotated params ("def scale(value"); the terminating
-		// colon is the last colon followed only by whitespace.
+		// colon is the first colon at paren depth 0.
 		expect(fn?.signature).toBe("def scale(value: int, factor: float = 1.0):");
+	});
+
+	it("cuts python class signatures at the header colon instead of flattening the body", async () => {
+		const code = [
+			"class Widget:",
+			"    def __init__(self):",
+			"        self.x = 1",
+			"",
+			"    def render(self) -> str:",
+			"        return 'widget'",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/widget.py", "python");
+		const cls = analysis.symbols.find((symbol) => symbol.name === "Widget");
+		// Brace-less class headers have no "{" to cut at: pre-fix the signature (and the
+		// symbol.text derived from it) collapsed the whole class body into one string.
+		expect(cls?.signature).toBe("class Widget:");
+		expect(cls?.text).toBe("class Widget:");
 	});
 
 	it("splits the pack buffer when draft-less gaps would blow the span budget", async () => {
