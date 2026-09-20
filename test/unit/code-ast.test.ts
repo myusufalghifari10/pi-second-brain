@@ -596,7 +596,11 @@ describe("AST code analysis", () => {
 		const parsed = analysis.chunks.map((chunk) => JSON.parse(chunk.metadata_json));
 		const kindOf = (name: string) => parsed.find((meta) => meta.symbol === name)?.symbol_kind;
 		expect(kindOf("bar")).toBe("function"); // was "method" pre-fix (declaration+parentSymbol)
-		expect(parsed.some((meta) => meta.symbol === "cb")).toBe(false); // data member, not a method
+		// The tree-sitter-c alias makes the TOP-level declarator of `int (*cb)(int);` a
+		// function_declarator (parenthesized inner) — assert on SYMBOLS, not just chunks:
+		// cb must not appear as a function symbol (pre-fix it did).
+		const cbSymbol = analysis.symbols.find((symbol) => symbol.name === "cb");
+		expect(cbSymbol).toBeUndefined();
 	});
 
 	it("covers C++ template headers in the chunk span", async () => {
@@ -606,6 +610,30 @@ describe("AST code analysis", () => {
 		const chunk = analysis.chunks.find((c) => c.content.includes("identity"));
 		expect(chunk?.content).toContain("template <typename T>"); // header line was uncovered pre-fix
 		expect(chunk?.start_line).toBe(1);
+	});
+
+	it("covers nested C++ template headers with the outermost span", async () => {
+		const code = [
+			"template <typename T>",
+			"template <typename U>",
+			"U Worker<T>::convert(U value) { return value; }",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/worker.cpp", "cpp");
+		const chunk = analysis.chunks.find((c) => c.content.includes("convert"));
+		expect(chunk?.content).toContain("template <typename T>"); // outer header was uncovered pre-fix
+		expect(chunk?.start_line).toBe(1);
+	});
+
+	it("strips quotes from TS ambient module names", async () => {
+		const code = ['declare module "left-pad" {', "  export function pad(s: string, n: number): string;", "}"].join(
+			"\n",
+		);
+
+		const analysis = await analyzeCodeWithAST(code, "src/types.d.ts", "typescript");
+		// Pre-fix the name kept the literal quotes: \"left-pad\" with quote chars, breaking
+		// exact symbol lookup for left-pad.
+		expect(analysis.symbols.some((symbol) => symbol.name === "left-pad")).toBe(true);
 	});
 
 	it("gives multi-declarator exports per-declarator spans", async () => {

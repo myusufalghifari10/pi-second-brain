@@ -310,6 +310,12 @@ function qmlBindingName(node: ASTNode): string | undefined {
 
 function getName(node: ASTNode): string | undefined {
 	if (node.type === "constructor_declaration" || node.type === "compact_constructor_declaration") return "constructor";
+	// TS ambient `declare module "x"` has a string-literal name — strip the surrounding
+	// quotes so symbol/scope names match plain identifiers.
+	if (node.type === "module" || node.type === "internal_module") {
+		const name = node.childForFieldName("name")?.text;
+		if (name) return name.replace(/^(['"])([\s\S]*)\1$/, "$2");
+	}
 	// Go type_declaration has no name field of its own — the name lives on the type_spec/
 	// type_alias child (grouped `type ( ... )` blocks resolve to their first spec).
 	if (node.type === "type_declaration") {
@@ -410,16 +416,18 @@ function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | und
 		}
 		if (leaf?.startsWith("~")) return "destructor";
 		if (node.type === "field_declaration") {
-			// C/C++ member: prototypes and destructor declarations are methods. A pointer/
-			// reference declarator wrapping a function_declarator is a DATA member (int (*cb)(int);)
-			// — not a method. Out-of-class free prototypes (namespace App { void bar(); }) are
-			// plain declarations and fall through to "function".
+			// C/C++ members: prototypes and destructor declarations are methods. A pointer-to-
+			// function DATA member (`int (*cb)(int);`) parses with the TOP-level declarator
+			// ALIASED to function_declarator whose `declarator` field is a parenthesized_declarator
+			// (the parens are mandatory for ptr-to-function). A plain identifier/pointer inner
+			// declarator is a method prototype (possibly pointer-returning, `int *get(void);`).
 			const declarator = node.childForFieldName("declarator");
-			const wrappedFunctionDeclarator =
-				declarator &&
-				declarator.type !== "function_declarator" &&
-				nodeChildren(declarator).some((child) => child.type === "function_declarator");
-			return wrappedFunctionDeclarator ? undefined : "method";
+			const fnDeclarator =
+				declarator?.type === "function_declarator"
+					? declarator
+					: nodeChildren(declarator ?? node).find((child) => child.type === "function_declarator");
+			const isDataFnPointer = fnDeclarator?.childForFieldName("declarator")?.type === "parenthesized_declarator";
+			return isDataFnPointer ? undefined : "method";
 		}
 		if (name?.includes("::")) return leaf?.startsWith("~") ? "destructor" : "method";
 		return "function";
@@ -460,8 +468,18 @@ function signatureFromText(text: string, kind: StructureKind, language: string):
 	// must look at the first code line so decorated python defs/classes are not misrouted
 	// into the brace-cut path (where the missing '{' flattens the whole body).
 	// The def/class header may sit BELOW a multi-line decorator (@app.route(\n args... \n));
-	// find the header line directly instead of skipping @-prefixed lines one by one.
-	const headerLine = normalized.split("\n").find((line) => /^\s*(async\s+def|def|class)\b/.test(line)) ?? normalized;
+	// find the header line directly and CAPTURE its offset during the scan (a second
+	// indexOf could re-anchor onto an earlier occurrence inside a decorator string literal).
+	let headerLine = normalized;
+	let headerOffset = 0;
+	for (const line of normalized.split("\n")) {
+		if (/^\s*(async\s+def|def|class)\b/.test(line)) {
+			headerLine = line;
+			break;
+		}
+		headerOffset += line.length + 1;
+	}
+	if (headerLine === normalized) headerOffset = 0;
 	const isPython = language === "python" && /^\s*(async\s+def|def|class)\b/.test(headerLine);
 	const isPythonDef = isPython && /^\s*(async\s+def|def)\b/.test(headerLine);
 	const bodyMarkers =
@@ -478,7 +496,7 @@ function signatureFromText(text: string, kind: StructureKind, language: string):
 		// the signature (and then into symbol.text). Language-gated: bare `class` in TS/JS/
 		// C++/Java must keep the brace-cut path. The window starts at the HEADER line so
 		// decorator prefixes (@dataclass, @functools.cache) stay out of the signature.
-		start = normalized.indexOf(headerLine);
+		start = headerOffset;
 		const colon = depthZeroColonEnd(normalized.slice(start));
 		if (colon > 0)
 			end = Math.min(end, start + colon + 1); // include the terminating colon
@@ -585,9 +603,18 @@ function collectStructureNodes(node: ASTNode, context: BuildContext, map: ByteIn
 		}
 	}
 	if (node.type === "template_declaration") {
-		// Like the other wrappers: the span must cover the `template <...>` header lines so
-		// the template parameters are inside the chunk and the start_line/signature include them.
-		const structuralChild = firstStructuralChild(node);
+		// Unwrap nested template chains (out-of-line member templates) keeping the OUTERMOST
+		// header in the span, then route the innermost real structural child as usual.
+		let innermost = node;
+		while (true) {
+			const next = nodeChildren(innermost).find((child) => child.type === "template_declaration");
+			if (!next) break;
+			innermost = next;
+		}
+		const structuralChild =
+			innermost === node
+				? firstStructuralChild(node)
+				: nodeChildren(innermost).find((child) => isStructuralCandidate(child));
 		if (structuralChild) {
 			return collectStructureNodes(structuralChild, { ...context, spanNode: node }, map);
 		}
