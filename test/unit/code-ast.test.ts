@@ -498,6 +498,52 @@ describe("AST code analysis", () => {
 		expect(cls?.text).toBe("class Widget:");
 	});
 
+	it("keeps non-python class signatures on the brace-cut path", async () => {
+		// Regression pins for the round-20 blocker: the python colon-cutter must never see
+		// TS/JS/C++ classes (bare `class` keyword exists in those languages too).
+		const ts = await analyzeCodeWithAST(
+			["class Auth {", "  refreshToken(token: string): string { return token; }", "}"].join("\n"),
+			"src/auth.ts",
+			"typescript",
+		);
+		expect(ts.symbols.find((symbol) => symbol.name === "Auth")?.signature).toBe("class Auth");
+
+		const cpp = await analyzeCodeWithAST(
+			["class MainWindow {", "public:", "  void openFile();", "};"].join("\n"),
+			"src/main.cpp",
+			"cpp",
+		);
+		expect(cpp.symbols.find((symbol) => symbol.name === "MainWindow")?.signature).toBe("class MainWindow");
+	});
+
+	it("routes decorated python defs and classes through the colon cut", async () => {
+		const code = [
+			"import functools",
+			"@dataclass",
+			"class Point:",
+			"    x: int = 0",
+			"",
+			"@functools.cache",
+			"def sample():",
+			"    return Point()",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/point.py", "python");
+		// The decorated_definition wrapper starts with '@' — the header sniff must skip
+		// decorator lines, or these fall into the brace-cut path and flatten the body.
+		expect(analysis.symbols.find((symbol) => symbol.name === "Point")?.signature).toBe("class Point:");
+		expect(analysis.symbols.find((symbol) => symbol.name === "sample")?.signature).toBe("def sample():");
+	});
+
+	it("ignores colons and brackets inside quoted string defaults", async () => {
+		const code = ['def render(sep="):"):', "    return sep"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/render.py", "python");
+		// The ')' and ':' inside the string default must not reset depth or terminate the
+		// header early; the signature keeps the full header through its real terminator.
+		expect(analysis.symbols.find((symbol) => symbol.name === "render")?.signature).toBe('def render(sep="):"):');
+	});
+
 	it("splits the pack buffer when draft-less gaps would blow the span budget", async () => {
 		const gapLiteral =
 			"const GAP_DATA = [\n" +

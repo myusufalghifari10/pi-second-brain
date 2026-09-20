@@ -139,6 +139,8 @@ export interface SearchResult {
 		indexed_at: number;
 		source_mtime?: number;
 		stale: boolean;
+		// "symbol" is reserved: declared for contract stability, never emitted by any current
+		// code path (matchReasonFor and both injection legs emit the other seven values).
 		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive" | "formula" | "dependency";
 		source_chunk_ids?: string[];
 		// Layer 4 label graph (spec §3.5): resolved outgoing label edges of this chunk. Present

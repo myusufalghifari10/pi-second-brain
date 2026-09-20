@@ -9,7 +9,7 @@ export default defineConfig({
 		// unbounded parallel forks thrash CPU/RAM and produce timeout cascades (the documented
 		// flaky family). Six concurrent files keeps wall time reasonable without the storm.
 		poolOptions: {
-			forks: { maxForks: 6 },
+			forks: { maxForks: 4 },
 		},
 	},
 });

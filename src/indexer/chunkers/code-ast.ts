@@ -413,8 +413,20 @@ function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | und
 // lambda defaults) sit at depth >= 1; body colons (dict literals) come after the header.
 function depthZeroColonEnd(text: string): number {
 	let depth = 0;
+	let quote: '"' | "'" | undefined;
 	for (let i = 0; i < text.length; i++) {
 		const ch = text[i];
+		// Quote-aware: a ')' or ':' inside a string default (def f(sep=\"):\") must not
+		// reset depth or masquerade as the header terminator.
+		if (quote) {
+			if (ch === "\\") i++;
+			else if (ch === quote) quote = undefined;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			continue;
+		}
 		if (ch === "(" || ch === "[") depth++;
 		else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
 		else if (ch === ":" && depth === 0) return i;
@@ -422,31 +434,41 @@ function depthZeroColonEnd(text: string): number {
 	return -1;
 }
 
-function signatureFromText(text: string, kind: StructureKind): string | undefined {
+function signatureFromText(text: string, kind: StructureKind, language: string): string | undefined {
 	const normalized = text.trim();
 	if (!normalized) return undefined;
-	const isPython =
-		normalized.startsWith("def ") || normalized.startsWith("async def ") || normalized.startsWith("class ");
+	// Decorator lines (@dataclass, @pytest.fixture(...)) precede the real header; the sniff
+	// must look at the first code line so decorated python defs/classes are not misrouted
+	// into the brace-cut path (where the missing '{' flattens the whole body).
+	const headerLine = normalized.split("\n").find((line) => !line.trim().startsWith("@")) ?? normalized;
+	const isPython = language === "python" && /^\s*(async\s+def|def|class)\b/.test(headerLine);
+	const isPythonDef = isPython && /^\s*(async\s+def|def)\b/.test(headerLine);
 	const bodyMarkers =
 		kind === "function" || kind === "method" || kind === "constructor" || kind === "destructor"
-			? normalized.startsWith("def ") || normalized.startsWith("async def ")
+			? isPythonDef
 				? [":"]
 				: ["{", "=>"]
 			: ["{"];
 	let end = normalized.length;
+	let start = 0;
 	if (isPython) {
 		// Python def AND class headers both terminate at a depth-0 colon; there is no "{" to
 		// cut at, so the brace-less path would otherwise flatten the entire class body into
-		// the signature (and then into symbol.text).
-		const colon = depthZeroColonEnd(normalized);
-		if (colon > 0) end = Math.min(end, colon + 1); // include the terminating colon
+		// the signature (and then into symbol.text). Language-gated: bare `class` in TS/JS/
+		// C++/Java must keep the brace-cut path. The window starts at the HEADER line so
+		// decorator prefixes (@dataclass, @functools.cache) stay out of the signature.
+		start = normalized.indexOf(headerLine);
+		const colon = depthZeroColonEnd(normalized.slice(start));
+		if (colon > 0)
+			end = Math.min(end, start + colon + 1); // include the terminating colon
+		else start = 0; // no terminator found: fall back to the full text window
 	} else {
 		for (const marker of bodyMarkers) {
 			const index = normalized.indexOf(marker);
 			if (index > 0) end = Math.min(end, marker === "=>" ? index + marker.length : index);
 		}
 	}
-	const firstLine = normalized.slice(0, end).replace(/\s+/g, " ").trim();
+	const firstLine = normalized.slice(start, end).replace(/\s+/g, " ").trim();
 	return firstLine.length > 280 ? `${firstLine.slice(0, 277)}...` : firstLine;
 }
 
@@ -469,7 +491,7 @@ function createStructureNode(
 		kind,
 		astType: node.type,
 		name,
-		signature: signatureFromText(text, kind),
+		signature: signatureFromText(text, kind, context.language),
 		language: context.language,
 		startLine: span.startPosition.row + 1,
 		endLine: span.endPosition.row + 1,
