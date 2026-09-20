@@ -175,6 +175,23 @@ function applyFilters(results: SearchResult[], filters: SearchFilters): SearchRe
 
 ---
 
+## 7b. Expand Neighbors (Top-Hit Context)
+
+`expand_neighbors` (0-2, default 0) 把 top hit（results[0]）的相鄰 chunk 附加為唯讀 context，方便取得
+定義句或表格的上下文：
+
+```typescript
+const r = await engine.search("A means", { mode: "fast", expand_neighbors: 1 });
+// r.results[0].context = [{ chunk_id, file_path, start_line, end_line, content, relation: "previous" | "next" }]
+```
+
+- Neighbors 不佔用 limit、不影響分頁（total_count / has_more 不變）。
+- 只作用於 results[0]；相鄰定義依同檔案 (start_line, end_line) 順序，prev 排前、next 排後。
+- 預設（0 或未傳）結果與舊行為 byte-identical：results 不帶 context 欄位。
+- Engine 端 clamp 0..2；DB 端為兩個 indexed ORDER BY ... LIMIT 查詢，O(1) 開銷。
+
+---
+
 ## 8. 完整流程
 
 ```

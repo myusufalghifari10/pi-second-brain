@@ -68,6 +68,7 @@ import {
 	findExactFormulas,
 	findResolvedLabelEdges,
 	finishIndexingJob,
+	getAdjacentChunks,
 	getChunkById,
 	getChunkCount,
 	getChunksByFile,
@@ -121,6 +122,18 @@ export interface SearchOptions {
 	kb_id?: string;
 	filters?: { file_type?: string; path_pattern?: string };
 	diversity?: "off" | "balanced" | "strong";
+	// Attach up to N adjacent chunks (same file, start_line order) of the top hit as read-only context.
+	// Neighbors never consume limit or affect pagination; 0 (default) keeps results byte-identical.
+	expand_neighbors?: number;
+}
+
+export interface NeighborContext {
+	chunk_id: string;
+	file_path: string;
+	start_line: number;
+	end_line: number;
+	content: string;
+	relation: "previous" | "next";
 }
 
 export interface SearchResult {
@@ -132,6 +145,8 @@ export interface SearchResult {
 	snippet: string;
 	start_line: number;
 	end_line: number;
+	// Present only when expand_neighbors > 0: adjacent chunks of the TOP hit (results[0]).
+	context?: NeighborContext[];
 	ranking?: RankingDiagnostics;
 	provenance?: {
 		chunk_id: string;
@@ -153,6 +168,44 @@ export interface DependencyEdgeProvenance {
 	label: string;
 	chunk_id: string;
 	pinned: boolean;
+}
+
+/**
+ * Attach adjacent same-file chunks to the TOP hit (results[0]) as read-only context. Neighbors
+ * never consume limit or pagination. When count <= 0 or there is nothing to attach, results are
+ * returned unchanged (same object identity) so the default path stays byte-identical.
+ */
+function withNeighborContext(db: Database.Database, results: SearchResult[], count: number): SearchResult[] {
+	if (count <= 0 || results.length === 0) return results;
+	const topChunkId = results[0]?.provenance?.chunk_id;
+	if (!topChunkId) return results;
+	const topChunk = getChunkById(db, topChunkId);
+	if (!topChunk) return results;
+	const { before, after } = getAdjacentChunks(
+		db,
+		topChunk.kb_id,
+		topChunk.file_path,
+		topChunk.start_line,
+		topChunk.end_line,
+		count,
+	);
+	const context: NeighborContext[] = [
+		...before.map((c) => neighborOf(c, "previous")),
+		...after.map((c) => neighborOf(c, "next")),
+	];
+	if (context.length === 0) return results;
+	return results.map((r, i) => (i === 0 ? { ...r, context } : r));
+}
+
+function neighborOf(c: Chunk, relation: "previous" | "next"): NeighborContext {
+	return {
+		chunk_id: c.id,
+		file_path: c.file_path,
+		start_line: c.start_line,
+		end_line: c.end_line,
+		content: c.content,
+		relation,
+	};
 }
 
 export { CURRENT_EMBEDDING_MODEL } from "./embedding/provider.ts";
@@ -2125,6 +2178,10 @@ export class KnowledgeEngine {
 		const db = this.db;
 		const { mode = "hybrid", kb_id, filters, diversity = "balanced" } = options;
 		const rawOffset = options.offset ?? 0;
+		const rawExpand = options.expand_neighbors ?? 0;
+		// Bounded like offset: schema already caps at 2, but engine-side defense keeps the neighbor
+		// fetch (two indexed ORDER BY ... LIMIT queries) O(1) regardless of caller input.
+		const expandNeighbors = Number.isFinite(rawExpand) ? Math.max(0, Math.min(2, Math.trunc(rawExpand))) : 0;
 		const warnings: string[] = [];
 		// Upper-bound the offset: an absurd finite offset (accepted by the schema) would inflate
 		// candidateLimit past the chunk count and materialize the whole vector file in memory —
@@ -2519,7 +2576,7 @@ export class KnowledgeEngine {
 				};
 			});
 			return {
-				results,
+				results: withNeighborContext(db, results, expandNeighbors),
 				total_count: diversified.length,
 				has_more: offset + limit < diversified.length,
 				warnings: warnings.length > 0 ? warnings : undefined,
@@ -2609,7 +2666,7 @@ export class KnowledgeEngine {
 		}));
 
 		return {
-			results,
+			results: withNeighborContext(db, results, expandNeighbors),
 			total_count: total,
 			has_more: offset + limit < total,
 			warnings: warnings.length > 0 ? warnings : undefined,

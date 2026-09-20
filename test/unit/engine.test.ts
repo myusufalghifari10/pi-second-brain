@@ -570,6 +570,42 @@ describe("KnowledgeEngine", () => {
 			expect(nan.warnings?.some((w) => w.includes("offset capped")) ?? false).toBe(false);
 		});
 
+		it("expands the top hit with adjacent chunk context without consuming limit", async () => {
+			// 12 sizable paragraphs force >= 3 chunks; tokens NbToken01..NbToken12 mark paragraph positions.
+			const paragraphs: string[] = [];
+			for (let k = 1; k <= 12; k++) {
+				const token = `NbToken${String(k).padStart(2, "0")}`;
+				paragraphs.push(`${token} marks paragraph ${k}. ${"Filler sentence for chunk sizing purposes. ".repeat(18)}`);
+			}
+			writeFileSync(join(TEST_DIR, "neighbors.txt"), paragraphs.join("\n\n"));
+			await engine.add(join(TEST_DIR, "neighbors.txt"), "Neighbors KB");
+			const fast = { mode: "fast" as const, kb_id: "Neighbors KB", limit: 1 };
+
+			// Top hit inside the document: both neighbors present, relations ordered prev-then-next.
+			const mid = await engine.search("NbToken06", { ...fast, expand_neighbors: 1 });
+			expect(mid.results.length).toBe(1);
+			expect(mid.results[0].content).toContain("NbToken06");
+			const midContext = mid.results[0].context ?? [];
+			expect(midContext.length).toBe(2);
+			expect(midContext[0].relation).toBe("previous");
+			expect(midContext[1].relation).toBe("next");
+			expect(midContext.every((c) => c.file_path.endsWith("neighbors.txt"))).toBe(true);
+
+			// First chunk has no previous neighbor; boundary returns fewer without error.
+			const first = await engine.search("NbToken01", { ...fast, expand_neighbors: 2 });
+			const firstContext = first.results[0].context ?? [];
+			expect(firstContext.some((c) => c.relation === "previous")).toBe(false);
+			expect(firstContext.filter((c) => c.relation === "next").length).toBe(2);
+
+			// Default path stays clean: no context field without the option.
+			const plain = await engine.search("NbToken06", { ...fast });
+			expect(Object.keys(plain.results[0])).not.toContain("context");
+
+			// Engine-side clamp: absurd values behave like the cap instead of fetching unbounded neighbors.
+			const absurd = await engine.search("NbToken06", { ...fast, expand_neighbors: 99 });
+			expect((absurd.results[0].context ?? []).length).toBeLessThanOrEqual(4);
+		});
+
 		it("flags and refuses an oversized single-file document", async () => {
 			// Cap applies to PDF/DOCX too (the r14 fix covered text only): directory scans already
 			// skip oversized files, so single-file ingestion must not become the OOM loophole.

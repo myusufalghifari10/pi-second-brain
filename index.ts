@@ -498,38 +498,62 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "Filter by file path substring (for example src/engine.ts)" }),
 			),
 			diversity: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("balanced"), Type.Literal("strong")])),
+			expand_neighbors: Type.Optional(
+				Type.Number({
+					minimum: 0,
+					maximum: 2,
+					default: 0,
+					description: "Include up to N adjacent chunks of the top hit as context (0-2, default 0)",
+				}),
+			),
 			diagnostics: Type.Optional(
 				Type.Boolean({ description: "Include ranking diagnostics and mode/fallback details in the result" }),
 			),
 		}),
 		async execute(_id, params, _signal) {
 			const { engine } = await ensureInitialized();
-			const { query, mode, profile, limit, kb_id, offset, file_type, path_pattern, diversity, diagnostics } =
-				params as {
-					query: string;
-					mode?:
-						| "auto"
-						| "fast"
-						| "semantic"
-						| "hybrid"
-						| "deep"
-						| "adaptive"
-						| "code"
-						| "config"
-						| "docs"
-						| "errors"
-						| "decision";
-					profile?: "auto" | "balanced" | "low_token" | "precision" | "recall" | "long_context" | "code" | "docs";
-					limit?: number;
-					kb_id?: string;
-					offset?: number;
-					file_type?: string;
-					path_pattern?: string;
-					diversity?: "off" | "balanced" | "strong";
-					diagnostics?: boolean;
-				};
+			const {
+				query,
+				mode,
+				profile,
+				limit,
+				kb_id,
+				offset,
+				file_type,
+				path_pattern,
+				diversity,
+				diagnostics,
+				expand_neighbors,
+			} = params as {
+				query: string;
+				mode?:
+					| "auto"
+					| "fast"
+					| "semantic"
+					| "hybrid"
+					| "deep"
+					| "adaptive"
+					| "code"
+					| "config"
+					| "docs"
+					| "errors"
+					| "decision";
+				profile?: "auto" | "balanced" | "low_token" | "precision" | "recall" | "long_context" | "code" | "docs";
+				limit?: number;
+				kb_id?: string;
+				offset?: number;
+				file_type?: string;
+				path_pattern?: string;
+				diversity?: "off" | "balanced" | "strong";
+				diagnostics?: boolean;
+				expand_neighbors?: number;
+			};
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
-			const response = await engine.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
+			const response = await engine.search(
+				query,
+				{ mode, profile, limit, kb_id, offset, filters, diversity, expand_neighbors },
+				_signal,
+			);
 			if (response.results.length === 0) {
 				const details = [
 					"No results found.",

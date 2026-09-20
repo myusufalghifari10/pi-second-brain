@@ -230,6 +230,27 @@ describe("public tool contracts", () => {
 		});
 	});
 
+	it("passes expand_neighbors into the engine and bounds the schema at 0..2", async () => {
+		const tools = await registeredTools();
+
+		await tools.knowledge_search.execute?.(
+			"search",
+			{ query: "search", expand_neighbors: 2 },
+			undefined,
+			undefined,
+			undefined,
+		);
+		expect(toolState.searchOptions).toMatchObject({ expand_neighbors: 2 });
+
+		// Schema-level bound (structural): engine clamps at runtime, schema declares the contract.
+		const schema = (
+			tools.knowledge_search as unknown as {
+				parameters: { properties: Record<string, { minimum?: number; maximum?: number; default?: number }> };
+			}
+		).parameters;
+		expect(schema.properties.expand_neighbors).toMatchObject({ minimum: 0, maximum: 2, default: 0 });
+	});
+
 	it("requires explicit confirmation before destructive remove and clear wrapper calls", async () => {
 		const tools = await registeredTools();
 

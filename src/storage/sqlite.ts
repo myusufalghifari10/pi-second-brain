@@ -783,6 +783,34 @@ export function getChunkByRowid(db: Database.Database, rowid: number): Chunk | u
 	return db.prepare("SELECT * FROM chunks WHERE rowid = ?").get(rowid) as Chunk | undefined;
 }
 
+/** Adjacent chunks of one chunk within the same file, by (start_line, end_line) order. */
+export function getAdjacentChunks(
+	db: Database.Database,
+	kbId: string,
+	filePath: string,
+	startLine: number,
+	endLine: number,
+	count: number,
+): { before: Chunk[]; after: Chunk[] } {
+	const before = db
+		.prepare(
+			`SELECT * FROM chunks
+       WHERE kb_id = ? AND file_path = ? AND (start_line < ? OR (start_line = ? AND end_line < ?))
+       ORDER BY start_line DESC, end_line DESC
+       LIMIT ?`,
+		)
+		.all(kbId, filePath, startLine, startLine, endLine, count) as Chunk[];
+	const after = db
+		.prepare(
+			`SELECT * FROM chunks
+       WHERE kb_id = ? AND file_path = ? AND (start_line > ? OR (start_line = ? AND end_line > ?))
+       ORDER BY start_line ASC, end_line ASC
+       LIMIT ?`,
+		)
+		.all(kbId, filePath, startLine, startLine, endLine, count) as Chunk[];
+	return { before: before.reverse(), after };
+}
+
 export function deleteChunksByKB(db: Database.Database, kbId: string): void {
 	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(kbId);
 }
