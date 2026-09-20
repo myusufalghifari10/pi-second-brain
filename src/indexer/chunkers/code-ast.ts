@@ -156,7 +156,7 @@ const LANGS: Record<string, LangConfig> = {
 	},
 };
 
-const NAMESPACE_TYPES = new Set(["namespace_definition"]);
+const NAMESPACE_TYPES = new Set(["namespace_definition", "internal_module", "module"]);
 const QML_TYPES = new Set(["ui_binding", "ui_import", "ui_object_definition", "ui_property", "ui_signal"]);
 const CLASS_TYPES = new Set([
 	"abstract_class_declaration",
@@ -164,6 +164,7 @@ const CLASS_TYPES = new Set([
 	"class_definition",
 	"class_specifier",
 	"enum_declaration",
+	"record_declaration",
 ]);
 const INTERFACE_TYPES = new Set(["interface_declaration"]);
 const TYPE_TYPES = new Set([
@@ -188,7 +189,7 @@ const FUNCTION_TYPES = new Set([
 	"method_declaration",
 ]);
 const METHOD_TYPES = new Set(["method_definition"]);
-const CONSTRUCTOR_TYPES = new Set(["constructor_declaration"]);
+const CONSTRUCTOR_TYPES = new Set(["constructor_declaration", "compact_constructor_declaration"]);
 const DECLARATION_WRAPPERS = new Set(["export_statement", "decorated_definition", "template_declaration"]);
 const VARIABLE_DECLARATOR_TYPES = new Set(["variable_declarator"]);
 const FIELD_DEFINITION_TYPES = new Set(["public_field_definition", "field_definition", "property_declaration"]);
@@ -308,7 +309,14 @@ function qmlBindingName(node: ASTNode): string | undefined {
 }
 
 function getName(node: ASTNode): string | undefined {
-	if (node.type === "constructor_declaration") return "constructor";
+	if (node.type === "constructor_declaration" || node.type === "compact_constructor_declaration") return "constructor";
+	// Go type_declaration has no name field of its own — the name lives on the type_spec/
+	// type_alias child (grouped `type ( ... )` blocks resolve to their first spec).
+	if (node.type === "type_declaration") {
+		const spec = nodeChildren(node).find((child) => child.type === "type_spec" || child.type === "type_alias");
+		const name = spec?.childForFieldName("name")?.text;
+		if (name?.trim()) return name.trim();
+	}
 	if (node.type === "ui_object_definition") return firstNamedChildText(node, "identifier");
 	if (node.type === "ui_import") {
 		return firstNamedChildText(node, "nested_identifier") ?? firstNamedChildText(node, "identifier");
@@ -401,7 +409,18 @@ function kindForNode(node: ASTNode, context?: BuildContext): StructureKind | und
 			return "constructor";
 		}
 		if (leaf?.startsWith("~")) return "destructor";
-		if (node.type === "field_declaration" || (context?.parentSymbol && node.type === "declaration")) return "method";
+		if (node.type === "field_declaration") {
+			// C/C++ member: prototypes and destructor declarations are methods. A pointer/
+			// reference declarator wrapping a function_declarator is a DATA member (int (*cb)(int);)
+			// — not a method. Out-of-class free prototypes (namespace App { void bar(); }) are
+			// plain declarations and fall through to "function".
+			const declarator = node.childForFieldName("declarator");
+			const wrappedFunctionDeclarator =
+				declarator &&
+				declarator.type !== "function_declarator" &&
+				nodeChildren(declarator).some((child) => child.type === "function_declarator");
+			return wrappedFunctionDeclarator ? undefined : "method";
+		}
 		if (name?.includes("::")) return leaf?.startsWith("~") ? "destructor" : "method";
 		return "function";
 	}
@@ -440,7 +459,9 @@ function signatureFromText(text: string, kind: StructureKind, language: string):
 	// Decorator lines (@dataclass, @pytest.fixture(...)) precede the real header; the sniff
 	// must look at the first code line so decorated python defs/classes are not misrouted
 	// into the brace-cut path (where the missing '{' flattens the whole body).
-	const headerLine = normalized.split("\n").find((line) => !line.trim().startsWith("@")) ?? normalized;
+	// The def/class header may sit BELOW a multi-line decorator (@app.route(\n args... \n));
+	// find the header line directly instead of skipping @-prefixed lines one by one.
+	const headerLine = normalized.split("\n").find((line) => /^\s*(async\s+def|def|class)\b/.test(line)) ?? normalized;
 	const isPython = language === "python" && /^\s*(async\s+def|def|class)\b/.test(headerLine);
 	const isPythonDef = isPython && /^\s*(async\s+def|def)\b/.test(headerLine);
 	const bodyMarkers =
@@ -527,7 +548,7 @@ function buildVariableFunctionNodes(node: ASTNode, context: BuildContext, map: B
 	for (const declarator of declarators) {
 		if (!nodeHasFunctionValue(declarator)) continue;
 		const name = getName(declarator);
-		const spanNode = context.spanNode ?? (singleDeclarator ? node : declarator);
+		const spanNode = singleDeclarator ? (context.spanNode ?? node) : declarator;
 		const structural = createStructureNode(
 			declarator,
 			"function",
@@ -563,6 +584,14 @@ function collectStructureNodes(node: ASTNode, context: BuildContext, map: ByteIn
 			return collectStructureNodes(structuralChild, { ...context, exported: true, spanNode: node }, map);
 		}
 	}
+	if (node.type === "template_declaration") {
+		// Like the other wrappers: the span must cover the `template <...>` header lines so
+		// the template parameters are inside the chunk and the start_line/signature include them.
+		const structuralChild = firstStructuralChild(node);
+		if (structuralChild) {
+			return collectStructureNodes(structuralChild, { ...context, spanNode: node }, map);
+		}
+	}
 	if (node.type === "decorated_definition") {
 		const structuralChild = firstStructuralChild(node);
 		if (structuralChild) {
@@ -593,8 +622,18 @@ function collectStructureNodes(node: ASTNode, context: BuildContext, map: ByteIn
 	if (kind) {
 		const structural = createStructureNode(node, kind, getName(node), context, map);
 		const nested = scanChildren(node, childContext(structural, context), map);
+		// TS namespace/module bodies are statement_blocks, which the generic descent list
+		// must NOT recurse into globally (it is every function's body). Scan them here only.
+		const namespaceBlocks =
+			kind === "namespace"
+				? nodeChildren(node)
+						.filter((child) => child.type === "statement_block")
+						.flatMap((block) => scanChildren(block, childContext(structural, context), map))
+				: [];
 		structural.children.push(
-			...nested.filter((child) => child.startByte >= structural.startByte && child.endByte <= structural.endByte),
+			...[...nested, ...namespaceBlocks].filter(
+				(child) => child.startByte >= structural.startByte && child.endByte <= structural.endByte,
+			),
 		);
 		return [structural];
 	}

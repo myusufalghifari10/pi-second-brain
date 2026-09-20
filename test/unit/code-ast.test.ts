@@ -544,6 +544,96 @@ describe("AST code analysis", () => {
 		expect(analysis.symbols.find((symbol) => symbol.name === "render")?.signature).toBe('def render(sep="):"):');
 	});
 
+	it("routes multi-line-wrapped python decorators through the colon cut", async () => {
+		const code = [
+			"import pytest",
+			"@pytest.mark.parametrize(",
+			'    ("a", "b"),',
+			"    [(1, 2)],",
+			")",
+			"def add(a, b):",
+			"    return a + b",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/add.py", "python");
+		// The header line sits BELOW the wrapped decorator arguments — the sniff must find
+		// the def line directly, not merely skip leading @-lines.
+		expect(analysis.symbols.find((symbol) => symbol.name === "add")?.signature).toBe("def add(a, b):");
+	});
+
+	it("indexes members inside TypeScript namespaces and modules", async () => {
+		const code = [
+			"export function top(): number { return 0; }",
+			"export namespace Util {",
+			"  export function helper(): number { return 1; }",
+			"}",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/util.ts", "typescript");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		// internal_module bodies were never descended pre-fix: helper landed in NO chunk and
+		// NO symbol (silent index hole) in any mixed file.
+		expect(names).toContain("Util");
+		expect(names).toContain("helper");
+		expect(analysis.chunks.some((chunk) => chunk.content.includes("return 1"))).toBe(true);
+	});
+
+	it("names Go type declarations from their spec children", async () => {
+		const code = ["package main", "", "type Point struct {", "\tX int", "}", "", "type Meters int"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/point.go", "go");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		// type_declaration has no name field: pre-fix every Go type node was unnamed →
+		// no symbol row and metadata symbol degraded to the literal "type".
+		expect(names).toContain("Point");
+		expect(names).toContain("Meters");
+	});
+
+	it("kinds C++ namespace free prototypes as functions and struct fn-pointers as data", async () => {
+		const code = ["namespace App {", "  void bar();", "}", "struct S {", "  int (*cb)(int);", "};"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/mixed.cpp", "cpp");
+		const parsed = analysis.chunks.map((chunk) => JSON.parse(chunk.metadata_json));
+		const kindOf = (name: string) => parsed.find((meta) => meta.symbol === name)?.symbol_kind;
+		expect(kindOf("bar")).toBe("function"); // was "method" pre-fix (declaration+parentSymbol)
+		expect(parsed.some((meta) => meta.symbol === "cb")).toBe(false); // data member, not a method
+	});
+
+	it("covers C++ template headers in the chunk span", async () => {
+		const code = ["template <typename T>", "T identity(T value) { return value; }"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/identity.cpp", "cpp");
+		const chunk = analysis.chunks.find((c) => c.content.includes("identity"));
+		expect(chunk?.content).toContain("template <typename T>"); // header line was uncovered pre-fix
+		expect(chunk?.start_line).toBe(1);
+	});
+
+	it("gives multi-declarator exports per-declarator spans", async () => {
+		const code = ["export const a = () => 1, b = () => 2;"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/multi.ts", "typescript");
+		const contents = analysis.chunks.map((chunk) => chunk.content);
+		// Pre-fix both declarator nodes inherited the whole export statement span → two
+		// duplicate-content chunks. Post-fix: per-declarator spans or one packed group —
+		// either way NO identical-content duplicates.
+		expect(new Set(contents).size).toBe(contents.length);
+	});
+
+	it("indexes Java records and their compact constructors", async () => {
+		const code = [
+			"public record Point(int x, int y) {",
+			"  public Point {",
+			"    if (x < 0) throw new IllegalArgumentException();",
+			"  }",
+			"}",
+		].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/Point.java", "java");
+		const names = analysis.symbols.map((symbol) => symbol.name);
+		expect(names).toContain("Point");
+		expect(names).toContain("constructor");
+	});
+
 	it("splits the pack buffer when draft-less gaps would blow the span budget", async () => {
 		const gapLiteral =
 			"const GAP_DATA = [\n" +
