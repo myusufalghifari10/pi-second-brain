@@ -216,6 +216,125 @@ export function isMolecularFormula(text: string): boolean {
 	return (elementTokens?.length ?? 0) >= 2;
 }
 
+// --- FTS token-stream unification (fast-mode token symmetry) ---
+
+// preTokenizeForFTS's letter-digit splits shard ASCII formulas into single-char index
+// terms ("H2O" → "H 2 O") while the query-side length>1 filter drops exactly those
+// tokens (tokenizeForSearch("H2O") is empty), and the ₂→sub2 fold makes the subscript
+// spelling asymmetric ("H sub2 O", query {sub2}). This pass runs INSIDE
+// preTokenizeForFTS — the one pipeline shared by index-side content_tokenized and
+// query-side tokenizeForSearch — so one rewrite restores symmetry: maximal element-
+// count runs in the token stream collapse back to one composite token ("H 2 O" →
+// "H2O", "H sub2 O" → "H2O", "C O 2" → "CO2"), on both sides alike.
+
+const DIGIT_TOKEN_RE = /^\d+$/;
+const SUB_COUNT_TOKEN_RE = /^sub(\d+)$/; // canonicalizeMathText subscript pin (₂ → sub2)
+
+// Token anatomy after the split chain: punctuation stays GLUED to tokens ("(H2O)" →
+// "(H" "2" "O)", "\\ce{H2SO4}" → "\\ce{H" "2" "SO" "4" "}"), so element matching runs on
+// the trailing alnum run with all glued junk preserved verbatim onto the collapsed
+// token. The lead may itself contain alnum runs ("\\ce{") but must END non-alphanumeric,
+// so mixed tokens with two separated alnum runs ("Na-Cl", "SUCH") stay single opaque
+// cores and can never match. A core with internal punctuation is never an element. The
+// query side strips the same glue after this pass, so edge-preserving collapse stays
+// symmetric.
+const TOKEN_PARTS_RE = /^((?:[^A-Za-z0-9]+[A-Za-z0-9]+)*[^A-Za-z0-9]+)?([A-Za-z0-9]*)([^A-Za-z0-9]*)$/;
+
+function splitTokenEdges(token: string): { lead: string; core: string; tail: string } {
+	const match = TOKEN_PARTS_RE.exec(token);
+	if (!match) return { lead: "", core: token, tail: "" };
+	return { lead: match[1] ?? "", core: match[2], tail: match[3] };
+}
+
+// The acronym-glued split chain leaves all-caps element runs whole ("CO2" → "CO" "2",
+// "SO4" → "SO" "4"): decompose such cores into their single-letter element symbols.
+// Exactly two characters — the glued-fragment shape the split chain actually produces.
+// Longer all-caps prose words stay opaque: "SUCH" (S,U,C,H are all element letters)
+// must never decompose, and one-char cores are already exact tokens. Two-letter
+// symbols carry a lowercase second letter and survive the split chain as exact tokens
+// ("Cl2" → "Cl" "2"), so decomposition can only ever yield single-letter elements;
+// "Co" (proper case) is exact and never decomposed.
+function decomposeAllCapsCore(core: string): string[] | undefined {
+	if (core.length !== 2) return undefined;
+	const first = core[0];
+	const second = core[1];
+	if (first === undefined || second === undefined) return undefined;
+	if (!ELEMENT_ONE.has(first) || !ELEMENT_ONE.has(second)) return undefined;
+	return [first, second];
+}
+
+// One formula run at tokens[start]: optional stoichiometric coefficient, then element
+// tokens (exact symbol, or an all-caps run the acronym-glued split chain left whole —
+// "CO"/"SO" decompose to their single-letter symbols, Co ≠ CO untouched) each followed
+// by an optional count token (ASCII digits or a subN pin). Emission mirrors
+// chemNormalize (counts > 1 are kept, 1 is implicit). Guards mirror isMolecularFormula
+// (§3.1.1) — ≥ 2 element tokens AND ≥ 1 uppercase letter (every ELEMENT_ONE/
+// ELEMENT_TWO symbol is uppercase-initial, so that holds by construction) — plus a
+// ≥ 1 count requirement: every contracted formula vector carries a count, and prose
+// element-letter runs without counts ("NaCl, HCl;" → glued cores, "C, N, O cycles")
+// must never fuse or eat punctuation. "He"-the-pronoun and lowercase letters never
+// match. Math tokens are untouched: "x pow2" / "x sub2" have no element tokens, and
+// the pass runs BEFORE the unit cdot rewrite so unit streams ("N cdot m" → "N m") can
+// never be read as element sequences ("N", "m" stay two tokens; "Nm" stays one token).
+function matchFormulaRun(tokens: string[], start: number): { end: number; token: string } | undefined {
+	let i = start;
+	const head = splitTokenEdges(tokens[i]);
+	const lead = head.lead;
+	let prefix = "";
+	if (DIGIT_TOKEN_RE.test(head.core)) {
+		prefix = head.core; // tentative coefficient; discarded when the run fails the guard
+		i++;
+	}
+	const parts: string[] = [];
+	let elements = 0;
+	let counts = 0;
+	let tail = "";
+	for (;;) {
+		const current = tokens[i];
+		if (current === undefined) break;
+		const edges = splitTokenEdges(current);
+		const symbols = ELEMENT_ONE.has(edges.core) ? [edges.core] : decomposeAllCapsCore(edges.core);
+		if (symbols === undefined) break;
+		const next = tokens[i + 1];
+		let count = "";
+		if (next !== undefined && DIGIT_TOKEN_RE.test(splitTokenEdges(next).core)) {
+			count = splitTokenEdges(next).core;
+		} else if (next !== undefined) {
+			const sub = SUB_COUNT_TOKEN_RE.exec(splitTokenEdges(next).core);
+			if (sub) count = sub[1];
+		}
+		for (let s = 0; s < symbols.length; s++) {
+			const isLast = s === symbols.length - 1;
+			const symbolCount = isLast ? count : "";
+			parts.push(symbolCount !== "" && symbolCount !== "1" ? `${symbols[s]}${symbolCount}` : symbols[s]);
+		}
+		elements += symbols.length;
+		if (count !== "") counts++;
+		tail = count === "" ? edges.tail : splitTokenEdges(next).tail;
+		i += count === "" ? 1 : 2;
+	}
+	if (elements < 2 || counts < 1) return undefined;
+	return { end: i, token: lead + prefix + parts.join("") + tail };
+}
+
+export function rewriteFormulaTokens(stream: string): string {
+	if (!stream.includes(" ")) return stream; // a run needs ≥ 2 tokens; single tokens pass through
+	const tokens = stream.split(" ");
+	const out: string[] = [];
+	let collapsed = false;
+	for (let i = 0; i < tokens.length; i++) {
+		const hit = matchFormulaRun(tokens, i);
+		if (hit) {
+			out.push(hit.token);
+			i = hit.end - 1;
+			collapsed = true;
+		} else {
+			out.push(tokens[i]);
+		}
+	}
+	return collapsed ? out.join(" ") : stream;
+}
+
 // §3.1.2 pipeline (normative order):
 // 1. strip outer math fences, \ce{…} wrappers and state suffixes;
 // 2. fold unicode sub/superscript characters to ASCII via the local map;

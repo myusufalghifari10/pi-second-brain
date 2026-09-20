@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { chemNormalize, isMolecularFormula, MOLECULAR_RE } from "../../src/indexer/chem-normalize.ts";
+import {
+	chemNormalize,
+	isMolecularFormula,
+	MOLECULAR_RE,
+	rewriteFormulaTokens,
+} from "../../src/indexer/chem-normalize.ts";
+import { preTokenizeForFTS } from "../../src/indexer/chunker.ts";
 import { extractQueryFormulas, normalizeFormula } from "../../src/indexer/formula-normalize.ts";
 import { MAX_FORMULA_CHARS } from "../../src/indexer/math-text.ts";
+import { tokenizeForSearch } from "../../src/search/query.ts";
 
 describe("chemNormalize — F1 vectors (L4 spec §3.1)", () => {
 	it("H2SO4 ≡ H₂SO₄ ≡ \\ce{H2SO4} ≡ \\ce{H2SO4(aq)} → H2 S O4", () => {
@@ -209,5 +216,51 @@ describe("extractQueryFormulas — F2 chem query routing", () => {
 		const result = extractQueryFormulas("$H2O$ $CO2$ $NaCl$ $CaO$ $MgO$ $ZnO$");
 		expect(result.formulas).toHaveLength(5);
 		expect(result.formulas[0]?.normalized).toBe("H2 O");
+	});
+});
+
+describe("rewriteFormulaTokens — FTS token-stream unification (fast-mode token symmetry)", () => {
+	it("collapses sharded ASCII formula runs back to one composite token", () => {
+		expect(rewriteFormulaTokens("Heavy water ( H 2 O with deuterium )")).toBe("Heavy water ( H2O with deuterium )");
+		expect(rewriteFormulaTokens("Carbon dioxide is CO 2 gas")).toBe("Carbon dioxide is CO2 gas");
+		expect(rewriteFormulaTokens("H 2 SO 4 acid")).toBe("H2SO4 acid");
+		expect(rewriteFormulaTokens("glucose C 6 H 12 O 6 ring")).toBe("glucose C6H12O6 ring");
+		// the ₂ → sub2 pin participates as a count, so the subscript spelling unifies identically
+		expect(rewriteFormulaTokens("H sub2 O")).toBe("H2O");
+	});
+
+	it("keeps glued punctuation and stoichiometric coefficients on the collapsed token", () => {
+		expect(rewriteFormulaTokens("2 H 2 O freezes")).toBe("2H2O freezes");
+	});
+
+	it("never fuses count-less element runs or eats prose punctuation", () => {
+		expect(rewriteFormulaTokens("Na Cl, H Cl; and C, N, O cycles")).toBe("Na Cl, H Cl; and C, N, O cycles");
+		expect(rewriteFormulaTokens("Helium He is noble. He said")).toBe("Helium He is noble. He said");
+		expect(rewriteFormulaTokens("the p H 7 buffer")).toBe("the p H 7 buffer");
+	});
+
+	it("is identity for math and unit token streams", () => {
+		expect(rewriteFormulaTokens("x pow2 + y pow2 = r pow2")).toBe("x pow2 + y pow2 = r pow2");
+		expect(rewriteFormulaTokens("torque N cdot m")).toBe("torque N cdot m");
+		expect(rewriteFormulaTokens("single")).toBe("single");
+	});
+});
+
+describe("fast-mode token symmetry (index content_tokenized ≡ query tokenizeForSearch)", () => {
+	it("H2O: both spellings produce the same single term on index and query sides", () => {
+		expect(preTokenizeForFTS("Heavy water (H2O with deuterium)")).toBe("Heavy water (H2O with deuterium)");
+		expect(preTokenizeForFTS("Heavy water (H₂O with deuterium)")).toBe("Heavy water (H2O with deuterium)");
+		expect(tokenizeForSearch("H2O")).toEqual(tokenizeForSearch("H₂O"));
+		expect(tokenizeForSearch("H2O")).toEqual(new Set(["h2o"]));
+	});
+
+	it("CO2: the acronym-glued run unifies symmetrically", () => {
+		expect(preTokenizeForFTS("Carbon dioxide is CO2 gas")).toBe("Carbon dioxide is CO2 gas");
+		expect(tokenizeForSearch("CO2")).toEqual(new Set(["co2"]));
+	});
+
+	it("cross-spelling: an H2O doc and an H₂O doc share one token stream", () => {
+		expect(preTokenizeForFTS("water is H2O here")).toBe(preTokenizeForFTS("water is H₂O here"));
+		expect(tokenizeForSearch("(H₂O)")).toEqual(tokenizeForSearch("H2O"));
 	});
 });

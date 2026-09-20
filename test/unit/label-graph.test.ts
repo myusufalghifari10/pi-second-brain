@@ -667,10 +667,11 @@ describe("engine label graph backfill and dependency leg (F7/F8)", () => {
 			labeledChunk({
 				file_path: "docs/main.md",
 				// content_tokenized contains every pipeline token of the query below (for
-				// \ce{H2SO4} that is … ce … so), so strict-AND bm25 retrieves this chunk: it is
-				// the dependency TRIGGER (refs eq:aux).
-				content: "shared topic marker alpha flux law ce so",
-				content_tokenized: "shared topic marker alpha flux law ce so",
+				// \ce{H2SO4} that is ... ce ... h2so4 (the formula run collapses to one token on
+				// both sides), so strict-AND bm25 retrieves this chunk: it is the dependency
+				// TRIGGER (refs eq:aux).
+				content: "shared topic marker alpha flux law ce h2so4",
+				content_tokenized: "shared topic marker alpha flux law ce h2so4",
 				metadata_json: JSON.stringify({ labels: ["eq:main"], refs: ["eq:aux"] }),
 			}),
 			labeledChunk({

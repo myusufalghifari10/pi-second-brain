@@ -31,6 +31,14 @@ const DOCS: Record<string, string> = {
 		"Omega Notation",
 		"In physics the angular frequency is commonly written with \\Omega for ohm and \\omega for angular measure. The uppercase form appears in circuit analysis documents discussing resistance values.",
 	),
+	waterAscii: doc(
+		"Heavy Water ASCII",
+		"Heavy water is water that contains deuterium. Its molecular formula is H2O with an extra neutron in the nucleus of the hydrogen atoms.",
+	),
+	waterSubscript: doc(
+		"Heavy Water Subscript",
+		"Heavy water is water that contains deuterium. Its molecular formula is H₂O with an extra neutron in the nucleus of the hydrogen atoms.",
+	),
 };
 
 describe("math-aware retrieval (engine-less FTS)", () => {
@@ -83,6 +91,20 @@ describe("math-aware retrieval (engine-less FTS)", () => {
 		const results = searchBM25(db, "Ω");
 		expect(results.length).toBeGreaterThan(0);
 		expect(results.map((result) => result.chunkId)).toContain(chunkIdByDoc.omegaNotation);
+	});
+
+	it("finds ASCII H2O and subscript H₂O docs from both query spellings in fast mode (token symmetry)", () => {
+		for (const query of ["H2O", "H₂O"]) {
+			const results = searchBM25(db, query);
+			expect(results.length, query).toBeGreaterThan(0);
+			const hits = results.map((result) => result.chunkId);
+			expect(hits, query).toContain(chunkIdByDoc.waterAscii);
+			expect(hits, query).toContain(chunkIdByDoc.waterSubscript);
+		}
+		const asciiTarget = getChunkById(db, chunkIdByDoc.waterAscii);
+		expect(asciiTarget?.content).toContain("H2O");
+		const subscriptTarget = getChunkById(db, chunkIdByDoc.waterSubscript);
+		expect(subscriptTarget?.content).toContain("H₂O");
 	});
 
 	it("canonicalizes a 100KB caret run in under 100ms (single-pass caret chain rewrite)", () => {

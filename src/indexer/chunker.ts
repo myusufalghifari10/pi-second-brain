@@ -3,6 +3,7 @@ import { closeSync, type Dirent, existsSync, openSync, readdirSync, readFileSync
 import { extname, join, relative, sep } from "node:path";
 import ignore from "ignore";
 import type { ChunkInsert, KnowledgeSymbolInsert } from "../storage/sqlite.ts";
+import { rewriteFormulaTokens } from "./chem-normalize.ts";
 import {
 	canonicalizeMathText,
 	extractDisplayFormulas,
@@ -423,20 +424,26 @@ export function preTokenizeForFTS(content: string): string {
 	// Canonicalization MUST run after the existing chain (canonicalize-last): running it
 	// first would let the letter-digit split shred freshly minted composite tokens
 	// (pow2 → "pow 2", with "2" dropped by the length filter).
+	// rewriteFormulaTokens runs AFTER canonicalization (it reads the subN pins) and
+	// BEFORE the unit rewrites (so unit streams like "N cdot m" can never be read as
+	// element sequences): it re-unifies the formula runs the letter-digit splits shard
+	// ("H 2 O" → "H2O", "H sub2 O" → "H2O"), symmetrically for index and query.
 	// rewriteUnitWordVariants runs BEFORE rewriteUnitTokens so spelled-out unit words
 	// ("kilometers") and symbol forms ("km") converge on one token stream at BOTH index
 	// and query time, and so spelled forms feed the cdot rule symmetrically.
 	return rewriteUnitTokens(
 		rewriteUnitWordVariants(
-			canonicalizeMathText(
-				content
-					.replace(/([a-z])([A-Z])/g, "$1 $2")
-					.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-					.replace(/([a-zA-Z])(\d)/g, "$1 $2")
-					.replace(/(\d)([a-zA-Z])/g, "$1 $2")
-					.replace(/([\u4e00-\u9fff\u3400-\u4dbf])/g, " $1 ")
-					.replace(/\s+/g, " ")
-					.trim(),
+			rewriteFormulaTokens(
+				canonicalizeMathText(
+					content
+						.replace(/([a-z])([A-Z])/g, "$1 $2")
+						.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+						.replace(/([a-zA-Z])(\d)/g, "$1 $2")
+						.replace(/(\d)([a-zA-Z])/g, "$1 $2")
+						.replace(/([\u4e00-\u9fff\u3400-\u4dbf])/g, " $1 ")
+						.replace(/\s+/g, " ")
+						.trim(),
+				),
 			),
 		),
 	);
