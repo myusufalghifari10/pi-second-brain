@@ -1,50 +1,84 @@
 [
-	{
-		"id": "chem-h2so4-plain",
-		"query": "H2SO4",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-h2so4-unicode",
-		"query": "H₂SO₄",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-h2so4-ce",
-		"query": "\\ce{H2SO4}",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-calcium-hydroxide",
-		"query": "Ca(OH)2",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-ammonium-sulfate",
-		"query": "(NH4)2SO4",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-sulfate-ion",
-		"query": "\\ce{SO4^2-}",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-cobalt-ce",
-		"query": "\\ce{Co}",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	},
-	{
-		"id": "chem-carbon-monoxide",
-		"query": "CO",
-		"mode": "hybrid",
-		"expect": { "file_path": "chem-notes.md" }
-	}
+ {
+  "id": "chem-h2so4-plain",
+  "query": "H2SO4",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-h2so4-unicode",
+  "query": "H\u2082SO\u2084",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-h2so4-ce",
+  "query": "\\ce{H2SO4}",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-calcium-hydroxide",
+  "query": "Ca(OH)2",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-ammonium-sulfate",
+  "query": "(NH4)2SO4",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-sulfate-ion",
+  "query": "\\ce{SO4^2-}",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-cobalt-ce",
+  "query": "\\ce{Co}",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-carbon-monoxide",
+  "query": "CO",
+  "mode": "hybrid",
+  "expect": {
+   "file_path": "chem-notes.md"
+  }
+ },
+ {
+  "id": "chem-h2o-fast-plain",
+  "query": "H2O",
+  "mode": "fast",
+  "expect": {
+   "file_path": "chem-notes.md"
+  },
+  "note": "guards the ASCII formula fast-mode fix (224d797): index and query must both emit the unified h2o token"
+ },
+ {
+  "id": "chem-h2o-fast-unicode",
+  "query": "H\u2082O",
+  "mode": "fast",
+  "expect": {
+   "file_path": "chem-notes.md"
+  },
+  "note": "subscript spelling must canonicalize to the same fast-mode token as ASCII H2O"
+ }
 ]
