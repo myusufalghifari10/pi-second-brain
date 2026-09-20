@@ -469,4 +469,34 @@ describe("AST code analysis", () => {
 			expect(metadata(analysis.chunks[0]).language).toBe(item.language);
 		}
 	});
+
+	it("keeps annotated python signatures intact up to the terminating colon", async () => {
+		const code = ["import os", "def scale(value: int, factor: float = 1.0):", "    return value * factor"].join("\n");
+
+		const analysis = await analyzeCodeWithAST(code, "src/scale.py", "python");
+		const fn = analysis.symbols.find((symbol) => symbol.name === "scale");
+		// first-colon matching cut annotated params ("def scale(value"); the terminating
+		// colon is the last colon followed only by whitespace.
+		expect(fn?.signature).toBe("def scale(value: int, factor: float = 1.0):");
+	});
+
+	it("splits the pack buffer when draft-less gaps would blow the span budget", async () => {
+		const gapLiteral =
+			"const GAP_DATA = [\n" +
+			Array.from({ length: 400 }, (_, i) => `  "item-${i}-xxxxxxxxxxxxxxx",`).join("\n") +
+			"\n];\n";
+		const code = [
+			"export function beforeGap(): number { return 1; }",
+			gapLiteral,
+			"export function afterGap(): number { return 2; }",
+		].join("\n");
+
+		const chunks = await chunkWithAST(code, "src/gap.ts", "typescript");
+		const texts = chunks.map((chunk) => chunk.content);
+		// Both functions are packable with the same packKey, but the >6KB draft-less gap
+		// must split the pack: no emitted chunk may contain both functions nor exceed the
+		// 6,000-char span budget the other AST paths enforce.
+		expect(texts.some((text) => text.includes("beforeGap") && text.includes("afterGap"))).toBe(false);
+		expect(texts.every((text) => text.length <= 6200)).toBe(true);
+	});
 });

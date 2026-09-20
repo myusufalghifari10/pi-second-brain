@@ -675,11 +675,15 @@ function assembleChunkBlocks(
 		}
 		if (block.text.length > MAX_TEXT_CHUNK_CHARS) {
 			const oversizedText = buffer.length > 0 ? [...buffer.map((b) => b.text), block.text].join("\n\n") : block.text;
-			const oversizedStart = buffer.length > 0 ? bufferStart : defaultEndLine;
+			// Empty buffer → the oversized block's OWN start line is the provenance anchor; the
+			// section-end default would report lines beyond the sliced chunks' real location.
+			const oversizedStart = buffer.length > 0 ? bufferStart : block.startLine;
 			pushOversizedText(oversizedText, oversizedStart, bufferFormulas, pushChunk);
 			buffer = [];
 			bufferFormulas = [];
-			bufferStart = defaultEndLine;
+			// Re-anchor to the oversized block's start (not the section end): the first NORMAL
+			// block after it flushes with this bufferStart unless it re-anchors first.
+			bufferStart = block.startLine;
 			continue;
 		}
 		const next = [...buffer.map((b) => b.text), block.text].join("\n\n");
@@ -687,6 +691,10 @@ function assembleChunkBlocks(
 			flushBuffer();
 			bufferStart = block.startLine;
 		}
+		// Mirror appendAtomic's empty-buffer guard: a normal block that opens a fresh buffer
+		// carries its own start line (otherwise the post-oversized anchor above would leak
+		// into this chunk's provenance).
+		if (buffer.length === 0) bufferStart = block.startLine;
 		buffer.push(block);
 	}
 
@@ -745,7 +753,12 @@ export function chunkMarkdown(
 		const text = sectionLines.join("\n").trim();
 		if (text.length < 50) return;
 
-		const fullText = currentHeading ? `${currentHeading}\n\n${text}` : text;
+		// Reconstruct the heading→content gap from the real section lines: trim() collapses all
+		// leading blanks to a hard-coded 2-line layout, drifting every mid-section start_line by
+		// (1 − k) for k blank lines. k = 0 keeps the merge-safe single-blank layout.
+		const leadingBlanks = sectionLines.findIndex((l) => l.trim() !== "");
+		const gap = Math.max(1, leadingBlanks === -1 ? 1 : leadingBlanks);
+		const fullText = currentHeading ? `${currentHeading}\n${"\n".repeat(gap)}${text}` : text;
 		const blocks = markdownBlocks(fullText, sectionStart);
 		assembleChunkBlocks(blocks, pushMarkdownChunk, MARKDOWN_TARGET_TOKENS, endLine);
 	}
@@ -831,15 +844,19 @@ export function chunkText(content: string, filePath: string): Omit<ChunkInsert, 
 	function pushOversizedParagraph(para: string, formulas: string[]): void {
 		let offset = 0;
 		while (offset < para.length) {
-			const slice = para.slice(offset, offset + MAX_TEXT_CHUNK_CHARS).trim();
+			// Advance by the RAW slice's line count (mirror of pushOversizedText): trim() can
+			// remove leading/trailing blank lines and undercount consumed lines, drifting every
+			// later chunk's start/end lines earlier.
+			const rawSlice = para.slice(offset, offset + MAX_TEXT_CHUNK_CHARS);
+			const slice = rawSlice.trim();
 			if (slice.length >= 50) {
 				const metadata: ChunkMetadata = {};
 				if (formulas.length > 0) metadata.formulas = formulas;
 				chunks.push(
-					makeChunk(slice, filePath, fileType, lineOffset, lineOffset + slice.split("\n").length - 1, metadata),
+					makeChunk(slice, filePath, fileType, lineOffset, lineOffset + rawSlice.split("\n").length - 1, metadata),
 				);
 			}
-			lineOffset += slice.split("\n").length;
+			lineOffset += rawSlice.split("\n").length;
 			offset += MAX_TEXT_CHUNK_CHARS;
 		}
 	}

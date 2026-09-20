@@ -715,4 +715,35 @@ describe("chunker line coordinates", () => {
 		// windows count the split file line, so the last slice reports 105 (104 + 1 slack).
 		expect(chunks.at(-1)?.end_line).toBe(105);
 	});
+
+	it("keeps mid-section start lines exact after blank-line reconstruction", () => {
+		const filler = (word: string) => `${word} ${word} ${word.repeat(700).trim()}`.slice(0, 3600).trimEnd();
+		const md = ["# H", "", filler("alpha"), "", filler("gamma")].join("\n");
+		const chunks = chunkMarkdown(md, "gap.md");
+		const mid = chunks.filter((chunk) => chunk.start_line > 1);
+		// para1 lives on line 3, para2 on line 5 (k = 1 blank after the heading): the old
+		// hard-coded 2-line reconstruction drifted every mid-section chunk one line early.
+		expect(mid.map((chunk) => chunk.start_line)).toEqual([3, 5]);
+	});
+
+	it("anchors provenance to the oversized block itself, not the section end", () => {
+		const oversizedPara = ("oversized prefix " + "z".repeat(6500)).slice(0, 6800);
+		const md = [
+			"## H",
+			"",
+			oversizedPara.slice(0, 3250),
+			oversizedPara.slice(3250),
+			"",
+			"First after paragraph. Extra text to pass the fifty character minimum threshold here.",
+			"",
+			"Second after paragraph. More text to pass the fifty character minimum threshold too.",
+		].join("\n");
+		const chunks = chunkMarkdown(md, "anchor.md");
+		const starts = chunks.map((chunk) => chunk.start_line);
+		// Chunk 1 = heading + first oversized slice (buffer nonempty → anchor is the heading's
+		// line 1); slice 2 continues at 5. The post-oversized paragraphs must anchor to their
+		// own lines 6 and 8 — the section-end default (9) leaked into provenance pre-fix.
+		expect(starts).toEqual([1, 5, 6]); // last chunk spans First(6) → Second(8), endLine 8
+		expect(starts).not.toContain(9);
+	});
 });

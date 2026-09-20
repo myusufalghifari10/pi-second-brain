@@ -201,6 +201,9 @@ const FUNCTION_VALUE_TYPES = new Set([
 	"generator_function_declaration",
 ]);
 const AST_TARGET_TOKENS = 900;
+// Emitted packed content = raw byte span between pack endpoints; cap it at the chunker's
+// 6,000-char chunk bound so draft-less gaps cannot bypass the size budget.
+const AST_MAX_PACK_SPAN_BYTES = 6_000;
 const AST_MAX_TOKENS = 1_800;
 const MAX_AST_FALLBACK_CHARS = 6_000;
 
@@ -416,6 +419,23 @@ function signatureFromText(text: string, kind: StructureKind): string | undefine
 			: ["{"];
 	let end = normalized.length;
 	for (const marker of bodyMarkers) {
+		if (marker === ":") {
+			// Python: the header-terminating colon is the FIRST colon at parenthesis/bracket
+			// depth 0. first-colon-anywhere cuts annotated params (def f(x: int):); colons inside
+			// the parameter list (annotations, lambda defaults) all sit at depth >= 1, and body
+			// colons (dict literals) come after the terminator.
+			let depth = 0;
+			for (let i = 0; i < normalized.length; i++) {
+				const ch = normalized[i];
+				if (ch === "(" || ch === "[") depth++;
+				else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+				else if (ch === ":" && depth === 0) {
+					end = Math.min(end, i + 1); // include the terminating colon in the signature
+					break;
+				}
+			}
+			continue;
+		}
 		const index = normalized.indexOf(marker);
 		if (index > 0) end = Math.min(end, marker === "=>" ? index + marker.length : index);
 	}
@@ -735,9 +755,15 @@ function packDrafts(drafts: ChunkDraft[], map: ByteIndexMap): ChunkDraft[] {
 	}
 	for (const draft of drafts) {
 		const tokens = estimateTokens(draft.content);
+		// The packed content is the RAW byte span between the first and last draft; draft-less
+		// source between packable drafts (imports, loose declarations, comments) silently
+		// inflates it past every budget. Cap the projected span so the emitted slice stays
+		// within the same 6,000-char bound every other AST path enforces.
+		const projectedSpanBytes = buffer.length > 0 ? draft.endByte - buffer[0].startByte : 0;
 		const compatible =
 			draft.packable &&
 			buffer.length > 0 &&
+			projectedSpanBytes <= AST_MAX_PACK_SPAN_BYTES &&
 			buffer.every((item) => item.packable && item.packKey === draft.packKey) &&
 			bufferTokens + tokens <= AST_TARGET_TOKENS;
 		if (!draft.packable) {
