@@ -126,16 +126,19 @@ Hybrid/adaptive search must not always return something. Candidates must pass a 
 
 ## 5. Cross-Encoder Reranking
 
-只在 `mode: "deep"` 觸發。對 hybrid top candidates 做 pair-wise scoring:
+只在 `mode: "deep"` 觸發。對 hybrid top candidates 做 pair-wise scoring。實作直接以 AutoTokenizer 對 `text_pair` 做配對 tokenization（Transformers.js 的 text-classification pipeline 不支援 pair 輸入，會把 `{text, text_pair}` 當成單一文字而產生空序列），單-logit cross-encoder 以 sigmoid 計分、多類別分類器以 softmax-max：
 
 ```typescript
-async function rerank(query: string, candidates: Chunk[], topK: number, pipeline: Pipeline) {
-  const pairs = candidates.map(c => ({ text: query, text_pair: c.content }));
-  const scores = await pipeline(pairs);
-  return candidates
-    .map((c, i) => ({ chunk: c, score: scores[i][0].score }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+async function rerank(query: string, candidates: Chunk[], topK: number, tokenize: Tokenizer, model: SequenceClassificationModel) {
+  const scored = [];
+  for (const c of candidates) {
+    const [{ score }] = await rerankWithSingleRawLogit(
+      { text: query, text_pair: c.content }, tokenize, model, model.name,
+      config.rawLogits ? scoreSingleRawLogit : scorePairLogits,
+    );
+    scored.push({ chunk: c, score: score });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, topK);
 }
 ```
 

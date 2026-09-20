@@ -130,7 +130,9 @@ async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: st
 	const results: Array<{ chunkId: string; score: number }> = [];
 	for (const candidate of request.candidates) {
 		const output = await pipe({ text: request.query, text_pair: candidate.content });
-		const score = Array.isArray(output) ? (output[0]?.score ?? 0) : (output?.score ?? 0);
+		// The unified pair pipeline always resolves to a scored array; a missing entry scores 0
+		// (fail-open, consistent with the pre-unification fallback).
+		const score = (Array.isArray(output) ? output[0]?.score : undefined) ?? 0;
 		results.push({ chunkId: candidate.chunkId, score });
 	}
 	results.sort((a, b) => b.score - a.score);

@@ -132,6 +132,10 @@ Watcher snapshot 必須套用與 indexing scanner 一致的 suggested exclusions
 
 `knowledge_update` 還必須以 KB id 做 in-flight coalescing。Watcher 自動更新、手動 `knowledge_update`、重試與 shutdown 都可能重疊；guard state 必須在任何可 yield 的 work 前建立，dispose 必須等待 active update settle 後再關 DB。
 
+**[Trap 2026-09-20, audit round 16]** Transformers.js 的 `TextClassificationPipeline` 不支援 pair 輸入（`_call(texts)` 直接把參數丟給 tokenizer）。HF reranker 因此必須透過 `AutoTokenizer` + `AutoModelForSequenceClassification` 直接對 `text_pair` 做 tokenization（見 `rerankWithSingleRawLogit`）；絕不可改回 `pipeline("text-classification")` —— 那會讓 query/candidate 配對永遠到不了模型，所有候選分數變成常數 0，rerank 靜默退化成 identity 順序。預設計分：單-logit cross-encoder 用 sigmoid、多類別分類器用 softmax-max；`PI_KNOWLEDGE_RERANKER_RAW_LOGITS=true` 才回傳 raw logit。
+
+**[Scope 2026-09-20, audit round 17]** Latex 模式（`.tex` KB）的 atomic-unit 保護僅涵蓋 `\begin{…}` 環境；`\[…\]` 與 `$$` 區塊在 latex 模式下視為普通文字（markdown/text 模式才保護它們）。這是刻意裁決：.tex 的檢索契約是 section breadcrumbs 與 label metadata（AGENTS.md 已如此記載），不要在 latex 模式擴充 `\[` 保護，除非同時修訂該契約。
+
 **[Changed 2026-09-20, audit round 11]** 上一段的 coalescing 合約已反轉：重疊的 same-KB update 現在必須在建立 guard state 時就 **loudly reject**（"already running"），不得回傳 in-flight promise——coalesced caller 拿到的是 scan 早於自己 trigger 的過期結果，watcher 會誤把 "change indexed" 記帳而永久丟失變更。新合約：重疊呼叫一律 reject；watcher 把 rejection 記為 pending retry，等 in-flight update settle 後重跑（settle path 不得 consume 該次未索引的 disk state）；manual caller 拿到誠實的錯誤。dispose 仍須等待 active update settle。
 
 所有 destructive/mutation paths 都要尊重同一個 lifecycle gate。`add`、`import`、`update`、`remove`、`clear` 不可在任一 KB mutation active 時交錯；`dispose()` 開始後必須在任何 await 前設 shutdown state，late tool wrapper 呼叫只能拒絕，不能再拿舊 engine reference 寫 DB 或 vector files。
