@@ -87,5 +87,19 @@
 		"query": "fake sidecar emits linear actuator force diagram image markdown figure",
 		"mode": "hybrid",
 		"expect": { "file_path": "fake-sidecar.mjs" }
+	},
+	{
+		"id": "deep-kimi-delta-attention",
+		"query": "Kimi Delta Attention linear attention hybrid variant",
+		"mode": "deep",
+		"kb": "llm-papers",
+		"expect": { "file_path": "2026-models/kimi-k3-official.md" }
+	},
+	{
+		"id": "deep-kimi-k3-report",
+		"query": "Kimi K3 technical report MuonClip Muon optimizer",
+		"mode": "deep",
+		"kb": "llm-papers",
+		"expect": { "file_path": "2026-models/2607.24653.pdf" }
 	}
 ]
