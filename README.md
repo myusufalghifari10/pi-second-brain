@@ -1,6 +1,6 @@
 # pi-second-brain
 
-**A local-first RAG knowledge base for the [Pi](https://pi.dev) coding agent — your agent's second brain.**
+**A local-first RAG knowledge base for [Pi](https://pi.dev) — your agent's second brain: a research assistant that answers from your sources, not from its memory.**
 
 One local index that can hold **anything** — codebases, documentation, scientific papers, LaTeX, PDFs, websites, Obsidian vaults, plain notes — and search it the way you actually think: by **meaning**, by **exact symbol**, by **formula**, by **number**, by **table row**, or by **reference label**. SQLite + FTS5 + ONNX embeddings on your machine. No API keys, no telemetry, no cloud.
 
@@ -15,12 +15,16 @@ One local index that can hold **anything** — codebases, documentation, scienti
 
 ## Why
 
-Coding agents lose project context between sessions and cannot fit a repository into one prompt. pi-second-brain gives Pi durable, searchable project memory:
+Large language models are confident writers and unreliable researchers. They misremember numbers, invent citations, and blur one paper into the next — and no prompt fixes it, because the knowledge simply isn't there.
 
-- **Search by meaning** — hybrid BM25 + vector embeddings with weighted score fusion; conceptual queries find code and docs even when the wording differs.
-- **Search by evidence** — exact symbols, identifiers, error codes, config keys, and bare numbers like `11.94` or `H2SO4`.
-- **Ask science documents real questions** — math notation, chemical formulas, engineering units, LaTeX cross-references, and PDF tables are first-class retrieval targets, not glyph soup.
-- **Stay private** — everything runs locally. No project file is ever modified; indexes live under `~/.pi/knowledge/`.
+pi-second-brain fixes the part that *can* be fixed: it gives your agent a private corpus — arXiv papers, LaTeX, PDFs, websites, docs, code — and grounds every claim in a real, retrievable chunk of it. Ask about a formula, a table cell, a reagent, a benchmark number: the agent retrieves the exact passage, with provenance attached (which file, which chunk, why it matched), and answers from that — not from the fog of its training data.
+
+**A research assistant that shows its work:**
+
+- **Grounded by construction** — hybrid BM25 + vector retrieval finds passages by meaning *and* by evidence; when confidence is low it returns nothing rather than a plausible guess.
+- **Research-grade ingestion** — scientific PDFs keep their math, tables, figures, and labels; nothing degrades into glyph soup.
+- **Numbers and formulas are first-class evidence** — query by formula, by chemical species, by a bare benchmark digit; the passage that contains it comes back — with its row label.
+- **Private by default** — everything runs locally: SQLite + ONNX embeddings, no API keys, no cloud, no telemetry. Your unpublished research stays yours.
 
 ## Index anything
 
@@ -60,40 +64,42 @@ Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result 
 
 ## Feature Comparison
 
-| Feature | pi-second-brain | kiro-cli knowledge | pi-memory |
-|---------|:---:|:---:|:---:|
-| Index arbitrary files/dirs/URLs | ✅ | ✅ | ❌ |
-| Multiple named knowledge bases | ✅ | ✅ | ❌ |
-| Semantic (vector) search | ✅ | ✅ | ✅ (via qmd) |
-| BM25 keyword search | ✅ | ✅ | ✅ (via qmd) |
-| **Hybrid search + weighted score fusion** | ✅ | ❌ | partial |
-| **Cross-encoder reranking** | ✅ | ❌ | ❌ |
-| **Adaptive contextual search** | ✅ | ❌ | ❌ |
-| **Diversity reranking (MMR-style)** | ✅ | ❌ | ❌ |
-| **Adjacent-chunk context expansion** | ✅ | ❌ | ❌ |
-| **Incremental re-indexing** | ✅ | ❌ | ❌ |
-| **File watcher (auto-update)** | ✅ | ❌ | ❌ |
-| **Code-aware chunking (10 languages)** | ✅ | ❌ | ❌ |
-| **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
-| **Math notation matching** (`x²` ⇔ `x^2`) | ✅ | ❌ | ❌ |
-| **Query-by-formula retrieval** | ✅ | ❌ | ❌ |
-| **Chemistry normalization** (`H2SO4` ≡ `H₂SO₄` ≡ `\ce{}`) | ✅ | ❌ | ❌ |
-| **Engineering unit matching** (`N·m` ≡ `N m`) | ✅ | ❌ | ❌ |
-| **Numeric token search** (`2,056` ≡ `2056`) | ✅ | ❌ | ❌ |
-| **PDF math sidecar (marker/docling) + cache** | ✅ | ❌ | ❌ |
-| **PDF table→narrative coupling + row labels** | ✅ | ❌ | ❌ |
-| **PDF image persistence + OCR captions** | ✅ | ❌ | ❌ |
-| **LaTeX label graph** (`\ref` resolution) | ✅ | ❌ | ❌ |
-| **Obsidian frontmatter/wikilink metadata** | ✅ | ❌ | ❌ |
-| **Local embeddings (zero API)** | ✅ | ❌ | ✅ (via qmd) |
-| **Index quality diagnostics + health score** | ✅ | ❌ | ❌ |
-| **Metadata filters in search** | ✅ | ❌ | ❌ |
-| **Progress reporting + stuck-job detection** | ✅ | partial | ❌ |
-| **Portable JSONL export/import** | ✅ | ❌ | ❌ |
-| Cross-session persistence | ✅ | ✅ | ✅ |
-| Pi extension native | ✅ | N/A | ✅ |
-| Context injection per turn | ✅ | ❌ | ✅ |
-| RPC mode support | ✅ | N/A | N/A |
+| Feature | pi-second-brain | pi-knowledge (upstream) | kiro-cli knowledge | pi-memory |
+|---------|:---:|:---:|:---:|:---:|
+| **Math notation matching** (`x²` ⇔ `x^2`) | ✅ | ❌ | ❌ | ❌ |
+| **Query-by-formula retrieval** | ✅ | ❌ | ❌ | ❌ |
+| **Chemistry normalization** (`H2SO4` ≡ `H₂SO₄` ≡ `\ce{}`) | ✅ | ❌ | ❌ | ❌ |
+| **Engineering unit matching** (`N·m` ≡ `N m`) | ✅ | ❌ | ❌ | ❌ |
+| **Numeric token search** (`2,056` ≡ `2056`) | ✅ | ❌ | ❌ | ❌ |
+| **PDF math sidecar (marker/docling) + cache** | ✅ | ❌ | ❌ | ❌ |
+| **PDF table→narrative coupling + row labels** | ✅ | ❌ | ❌ | ❌ |
+| **PDF image persistence + OCR captions** | ✅ | ❌ | ❌ | ❌ |
+| **LaTeX-aware chunking + label graph** (`\ref` resolution) | ✅ | ❌ | ❌ | ❌ |
+| **Obsidian frontmatter/wikilink metadata** | ✅ | ❌ | ❌ | ❌ |
+| **Adjacent-chunk context expansion** (`expand_neighbors`) | ✅ | ❌ | ❌ | ❌ |
+| Index arbitrary files/dirs/URLs | ✅ | ✅ | ✅ | ❌ |
+| Multiple named knowledge bases | ✅ | ✅ | ✅ | ❌ |
+| Semantic (vector) search | ✅ | ✅ | ✅ | ✅ (via qmd) |
+| BM25 keyword search | ✅ | ✅ | ✅ | ✅ (via qmd) |
+| Hybrid search + weighted score fusion | ✅ | ✅ | ❌ | partial |
+| Cross-encoder reranking | ✅ | ✅ | ❌ | ❌ |
+| Adaptive contextual search | ✅ | ✅ | ❌ | ❌ |
+| Diversity reranking (MMR-style) | ✅ | ✅ | ❌ | ❌ |
+| Incremental re-indexing | ✅ | ✅ | ❌ | ❌ |
+| File watcher (auto-update) | ✅ | ✅ | ❌ | ❌ |
+| Code-aware chunking (10 languages) | ✅ | ✅ | ❌ | ❌ |
+| Symbol/config/heading lookup | ✅ | ✅ | ❌ | ❌ |
+| Local embeddings (zero API) | ✅ | ✅ | ❌ | ✅ (via qmd) |
+| Index quality diagnostics + health score | ✅ | ✅ | ❌ | ❌ |
+| Metadata filters in search | ✅ | ✅ | ❌ | ❌ |
+| Progress reporting + stuck-job detection | ✅ | ✅ | partial | ❌ |
+| Portable JSONL export/import | ✅ | ✅ | ❌ | ❌ |
+| Cross-session persistence | ✅ | ✅ | ✅ | ✅ |
+| Pi extension native | ✅ | ✅ | N/A | ✅ |
+| Context injection per turn | ✅ | ✅ | ❌ | ✅ |
+| RPC mode support | ✅ | ✅ | N/A | N/A |
+
+*The `pi-knowledge` column reflects the upstream v0.10.1 feature set this fork started from; other columns reflect each tool's public documentation.*
 
 ## Quick Start
 
