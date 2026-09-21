@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Added an MCP stdio surface (`src/mcp-server.ts`, launched via `pi-second-brain mcp`) so every MCP-capable harness (Claude Code, Codex, Cline, Cursor, Gemini CLI, OpenCode, ...) can drive the same engine, the same storage, and the same 13 `knowledge_*` tools as the native Pi extension. Tool definitions and the runtime lifecycle are collected from the extension factory through a shim host — one definition, one runtime owner, two transports; startup stays lazy and shutdown reuses the documented session-dispose contract.
+- Added a multi-harness installer CLI (`pi-second-brain setup|remove|list|mcp`) that detects installed harnesses and registers the MCP server in each native format (`claude mcp add`, `[mcp_servers.*]` in `~/.codex/config.toml`, `~/.cursor/mcp.json`, Cline's `cline_mcp_settings.json` with read-only auto-approvals, Gemini CLI `settings.json`, OpenCode `opencode.json`); idempotent re-runs never duplicate entries, and `remove` undoes cleanly. `package.json` gains a `bin` entry and a `prepare` build so `npm install -g github:myusufalghifari10/pi-second-brain` works before the npm registry package is published.
+- Added `skills/pi-second-brain/SKILL.md` so `npx skills add myusufalghifari10/pi-second-brain` installs the usage doctrine (modes, science layer, retrieval discipline, self-bootstrap) into 75+ agent harnesses via the vercel-labs skills CLI.
+
 ## [1.0.0] - 2026-09-21
 
 ### Added

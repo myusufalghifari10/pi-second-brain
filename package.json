@@ -5,6 +5,9 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
+	"bin": {
+		"pi-second-brain": "dist/src/cli.js"
+	},
 	"pi": {
 		"extensions": [
 			"./extension.js"
@@ -17,6 +20,7 @@
 		"extension.js",
 		"dist/",
 		".pi/",
+		"skills/",
 		"docs/configuration.md",
 		"docs/offline-mode.md",
 		"README.md",
@@ -41,10 +45,17 @@
 		"code-search",
 		"developer-tools",
 		"rag",
-		"embeddings"
+		"embeddings",
+		"mcp",
+		"model-context-protocol",
+		"claude-code",
+		"codex",
+		"cline",
+		"research-assistant"
 	],
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
+		"prepare": "npm run build",
 		"check": "biome check --write --error-on-warnings .",
 		"prepack": "npm run typecheck && npm run build",
 		"test": "vitest --run test/unit/",
@@ -55,6 +66,7 @@
 	},
 	"dependencies": {
 		"@huggingface/transformers": "3.8.1",
+		"@modelcontextprotocol/sdk": "^1.30.0",
 		"better-sqlite3": "12.11.1",
 		"ignore": "7.0.5",
 		"mammoth": "1.12.0",

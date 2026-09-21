@@ -35,6 +35,9 @@ type ExtensionAPI = {
 
 type Schema = Record<string, unknown> & { optional?: true };
 
+// Consumed by the MCP surface (src/mcp-server.ts) so both tool front doors share one definition.
+export type { ExtensionAPI, ToolDefinition };
+
 const Type = {
 	Object(properties: Record<string, Schema>): Schema {
 		const required = Object.entries(properties)

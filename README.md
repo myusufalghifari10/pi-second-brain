@@ -101,16 +101,91 @@ Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result 
 
 *The `pi-knowledge` column reflects the upstream v0.10.1 feature set this fork started from; other columns reflect each tool's public documentation.*
 
-## Quick Start
+## Install
 
-Requirements: Node ≥ 22. Model weights (~150 MB) download once and are cached locally.
+No build-from-source ceremony: one command teaches your agent the doctrine, one command gives it the
+actual tools. Every harness shares the same brain (`~/.pi/knowledge`).
+
+### 1. The skill (any of 75+ harnesses)
 
 ```bash
-git clone https://github.com/myusufalghifari10/pi-second-brain.git
+npx skills add myusufalghifari10/pi-second-brain
+```
+
+Installs the usage doctrine into Claude Code, Cursor, Codex, OpenCode, and [75 more agents](https://github.com/vercel-labs/skills)
+via the [skills CLI](https://github.com/vercel-labs/skills). The skill also teaches your agent to
+bootstrap the engine itself (next step) — so you can literally paste the skill install into your
+agent and let it do the rest.
+
+### 2. The engine (real tools over MCP)
+
+```bash
+npm install -g github:myusufalghifari10/pi-second-brain
+pi-second-brain setup --all
+pi-second-brain list        # verify what was detected
+```
+
+`setup` auto-registers the MCP server into the harnesses it finds — `claude mcp add` for Claude Code,
+`[mcp_servers.pi-second-brain]` in `~/.codex/config.toml`, `~/.cursor/mcp.json`, Cline's
+`cline_mcp_settings.json`, Gemini CLI's `settings.json`, and OpenCode's `opencode.json`. Re-run any
+time to update; `pi-second-brain remove --all` undoes everything. Restart your harness afterwards.
+
+### 3. Manual, per harness
+
+<details>
+<summary>Claude Code</summary>
+
+```bash
+claude mcp add --scope user pi-second-brain -- node /path/to/pi-second-brain/dist/src/cli.js mcp
+```
+
+</details>
+
+<details>
+<summary>Codex CLI</summary>
+
+Append to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.pi-second-brain]
+command = "/path/to/node"
+args = ["/path/to/pi-second-brain/dist/src/cli.js", "mcp"]
+```
+
+</details>
+
+<details>
+<summary>Cursor / Gemini CLI / Cline / OpenCode</summary>
+
+All four are a JSON entry pointing at the same command — or just run `pi-second-brain setup --all`,
+which writes the exact format each one expects.
+
+</details>
+
+<details>
+<summary>Pi (native extension — recommended on Pi)</summary>
+
+```bash
 pi install /absolute/path/to/pi-second-brain
 ```
 
-> An npm package is planned; for now, install from a local clone.
+Pi loads the extension directly: same tools, plus TUI rendering, per-session lifecycle, and opt-in
+context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`).
+
+</details>
+
+> An npm registry package is planned; until then, install from GitHub as shown above.
+
+### 4. Or just paste this to your agent
+
+```text
+Install pi-second-brain for me: npm install -g github:myusufalghifari10/pi-second-brain,
+then run pi-second-brain setup --all, then verify with pi-second-brain list.
+```
+
+## Usage
+
+Requirements: Node ≥ 22. Model weights (~150 MB) download once and are cached locally.
 
 Then just talk to your agent:
 
