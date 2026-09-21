@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { couplePdfTableNarrative, PDF_TABLE_CONTEXT_PREFIX } from "../../src/indexer/pdf-tables.ts";
+import {
+	couplePdfTableNarrative,
+	PDF_TABLE_CONTEXT_PREFIX,
+	PDF_TABLE_ROW_PREFIX,
+} from "../../src/indexer/pdf-tables.ts";
 
 const INTRO = "Table 5 shows the wall-clock latency of each method on an RTX 5060 GPU.";
 const TABLE = [
@@ -28,7 +32,8 @@ describe("couplePdfTableNarrative (PDF table-narrative coupling)", () => {
 	it("does not couple a table at the very start of the document", () => {
 		const coupled = couplePdfTableNarrative(`${tableText}\n\nClosing text.\n`);
 		expect(coupled).not.toContain(PDF_TABLE_CONTEXT_PREFIX);
-		expect(coupled).toContain(tableText);
+		// Data rows are stamped, so the block is no longer one contiguous substring; check per line.
+		for (const tableLine of TABLE) expect(coupled).toContain(tableLine);
 	});
 
 	it("does not couple a table preceded only by a heading", () => {
@@ -82,5 +87,61 @@ describe("couplePdfTableNarrative (PDF table-narrative coupling)", () => {
 	it("leaves ordinary prose without table runs byte-identical", () => {
 		const text = "Just two narrative lines.\nNothing tabular here at all.\n";
 		expect(couplePdfTableNarrative(text)).toBe(text);
+	});
+});
+
+describe("couplePdfTableNarrative row-label stamping", () => {
+	const STAMP_ROWS = [
+		"Method | Sparsity | PPL",
+		"--- | --- | ---",
+		"MaskLLM (end-to-end) | 62.53 | 5.1",
+		"GSQ (block-wise) | 62.86 | 5.3",
+		"62.86 | 1.0 | 2.0",
+	];
+
+	it("stamps lettered-first-cell data rows, leaving header, separator, and numeric-first-cell rows unstamped", () => {
+		const coupled = couplePdfTableNarrative(`${INTRO}\n\n${STAMP_ROWS.join("\n")}\n`);
+		expect(coupled).toContain(`${PDF_TABLE_ROW_PREFIX}MaskLLM (end-to-end) | ${STAMP_ROWS[2]}`);
+		expect(coupled).toContain(`${PDF_TABLE_ROW_PREFIX}GSQ (block-wise) | ${STAMP_ROWS[3]}`);
+		// Header row: no digit after the first cell. Separator: no letter. Rank-style row: pure-numeric first cell.
+		expect(coupled).toContain(STAMP_ROWS[0]);
+		expect(coupled).toContain(STAMP_ROWS[1]);
+		expect(coupled).toContain(STAMP_ROWS[4]);
+		expect(coupled).not.toContain(`${PDF_TABLE_ROW_PREFIX}Method`);
+		expect(coupled).not.toContain(`${PDF_TABLE_ROW_PREFIX}---`);
+	});
+
+	it("keeps a numeric hit co-located with its row label: number and method name share one line", () => {
+		const coupled = couplePdfTableNarrative(STAMP_ROWS.slice(0, 4).join("\n"));
+		const lines = coupled.split("\n");
+		const gsq = lines.find((line) => line.includes("62.86"));
+		expect(gsq).toBeDefined();
+		expect(gsq).toContain("GSQ (block-wise)");
+		const mask = lines.find((line) => line.includes("62.53"));
+		expect(mask).toBeDefined();
+		expect(mask).toContain("MaskLLM (end-to-end)");
+	});
+
+	it("is byte-identical when applied twice to stamped tables", () => {
+		const text = `${INTRO}\n\n${STAMP_ROWS.join("\n")}\n\nClosing narrative.\n`;
+		const once = couplePdfTableNarrative(text);
+		const twice = couplePdfTableNarrative(once);
+		expect(twice).toBe(once);
+	});
+
+	it("truncates row labels longer than 60 characters at a word boundary", () => {
+		const label = "MaskLLM trainable N:M sparsity with a very long descriptive method name that keeps going and going";
+		expect(label.length).toBeGreaterThan(60);
+		const expectedLabel = label.slice(0, label.lastIndexOf(" ", 60));
+		expect(expectedLabel.length).toBeLessThanOrEqual(60);
+		const rows = ["Method | Score | Rank", `${label} | 62.86 | 1`, "GSQ | 61.40 | 2"];
+		const coupled = couplePdfTableNarrative(rows.join("\n"));
+		expect(coupled).toContain(`${PDF_TABLE_ROW_PREFIX}${expectedLabel} | ${rows[1]}`);
+	});
+
+	it("passes markdown prose without table runs through unchanged", () => {
+		const md =
+			"# Results\n\nThe GSQ block-wise method scores 62.86 on the benchmark, as introduced in Table 5.\nDerivations appear in the appendix.\n";
+		expect(couplePdfTableNarrative(md)).toBe(md);
 	});
 });
