@@ -2,13 +2,19 @@
 // pi-second-brain CLI: the multi-harness installer and the MCP server launcher.
 //
 //   pi-second-brain mcp                       Run the MCP stdio server (what harnesses launch)
-//   pi-second-brain setup [--all|flags]       Register the MCP server into detected harnesses
+//   pi-second-brain setup [--all|flags]       Register into detected harnesses
 //   pi-second-brain remove [flags]            Undo registration
 //   pi-second-brain list                      Show which harnesses were detected
 //
-// Pi itself stays on the native extension path (`pi install`); every MCP-capable harness gets a
-// stdio entry that launches `node <this file> mcp`, so all harnesses share one brain
-// (~/.pi/knowledge). Registration is idempotent: re-running setup never duplicates entries.
+// Two install paths by design:
+// - Pi uses the NATIVE extension (`pi install <path>`) — the exact setup the maintainer runs. No
+//   MCP involved; `setup --pi` simply automates that same `pi install` against this package root.
+// - Every other harness gets an MCP stdio entry (`node <this file> mcp`) written in each harness's
+//   own config format, so all of them share one brain (~/.pi/knowledge).
+//
+// Detection follows the vercel-labs/skills CLI pattern: pure existsSync on config directories with
+// environment overrides respected (CLAUDE_CONFIG_DIR, CODEX_HOME) — never spawn the harness binary
+// just to detect it. Idempotent: re-running setup never duplicates entries.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
@@ -17,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
+const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const NODE_BIN = process.execPath;
 const SERVER_NAME = "pi-second-brain";
 const READ_ONLY_TOOLS = [
@@ -28,11 +35,35 @@ const READ_ONLY_TOOLS = [
 	"knowledge_doctor",
 ];
 
+const IS_WINDOWS = platform() === "win32";
+
+// Detection homes — env overrides first, mirroring vercel-labs/skills so installs that moved their
+// harness home (CLAUDE_CONFIG_DIR, CODEX_HOME) are still detected.
+const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
+const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+const XDG_CONFIG_HOME = join(homedir(), ".config");
+
 export function buildServerEntry(): { command: string; args: string[] } {
 	return { command: NODE_BIN, args: [CLI_PATH, "mcp"] };
 }
 
-// --- TOML (Codex: ~/.codex/config.toml) ----------------------------------------------------------
+function quoteWindowsArg(arg: string): string {
+	return /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '""')}"` : arg;
+}
+
+function runCapture(command: string, args: string[]): { ok: boolean; output: string } {
+	// On Windows, harness launchers are .cmd shims (claude.cmd, pi.cmd) that spawnSync cannot
+	// execute without a shell; quote args manually because shell mode joins them itself.
+	const finalArgs = IS_WINDOWS ? args.map(quoteWindowsArg) : args;
+	const result = spawnSync(command, finalArgs, { encoding: "utf8", shell: IS_WINDOWS });
+	if (result.error) return { ok: false, output: result.error.message };
+	return {
+		ok: result.status === 0,
+		output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
+	};
+}
+
+// --- TOML (Codex: $CODEX_HOME/config.toml) -------------------------------------------------------
 
 function tomlServerBlock(name: string, entry: { command: string; args: string[] }): string[] {
 	return [
@@ -66,7 +97,7 @@ export function stripTomlServer(content: string, name: string): string {
 	return [...lines.slice(0, start), ...lines.slice(end)].join("\n");
 }
 
-// --- JSON (Cursor / Cline / Gemini / OpenCode) ------------------------------------
+// --- JSON (Cursor / Cline / Gemini / OpenCode) ---------------------------------------------------
 
 export function upsertJsonMcpServer(
 	filePath: string,
@@ -117,46 +148,7 @@ export function removeJsonMcpServer(filePath: string, keyPath: string[]): "remov
 	return "removed";
 }
 
-// --- Harness targets ---------------------------------------------------------------
-
-function clineSettingsDir(): string | null {
-	if (platform() === "darwin")
-		return join(
-			homedir(),
-			"Library",
-			"Application Support",
-			"Code",
-			"User",
-			"globalStorage",
-			"saoudrizwan.claude-dev",
-			"settings",
-		);
-	if (platform() === "win32")
-		return join(
-			process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"),
-			"Code",
-			"User",
-			"globalStorage",
-			"saoudrizwan.claude-dev",
-			"settings",
-		);
-	return join(homedir(), ".config", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings");
-}
-
-function opencodeConfigPath(): string {
-	if (platform() === "win32")
-		return join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "opencode", "opencode.json");
-	return join(homedir(), ".config", "opencode", "opencode.json");
-}
-
-function runCapture(command: string, args: string[]): { ok: boolean; output: string } {
-	const result = spawnSync(command, args, { encoding: "utf8" });
-	if (result.error) return { ok: false, output: result.error.message };
-	return {
-		ok: result.status === 0,
-		output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
-	};
-}
+// --- Harness targets -----------------------------------------------------------------------------
 
 type TargetStatus = "configured" | "already" | "removed" | "not-detected" | "failed" | "manual";
 type Target = {
@@ -168,38 +160,59 @@ type Target = {
 	manualNote?: string;
 };
 
+function appDataDir(): string {
+	return process.env.APPDATA ?? join(homedir(), "AppData", "Roaming");
+}
+
+function piTarget(): Target {
+	return {
+		id: "pi",
+		label: "Pi (native extension)",
+		detect: () => existsSync(join(homedir(), ".pi", "agent")),
+		configure: () => {
+			const install = runCapture("pi", ["install", PACKAGE_ROOT]);
+			return install.ok ? "configured" : "failed";
+		},
+		remove: () => "manual",
+		manualNote:
+			"Pi uses the native extension (no MCP). Remove by deleting the entry from ~/.pi/agent/settings.json `packages`.",
+	};
+}
+
 function claudeTarget(): Target {
+	const manualCommand = `claude mcp add --scope user ${SERVER_NAME} -- ${NODE_BIN} ${CLI_PATH} mcp`;
 	return {
 		id: "claude",
 		label: "Claude Code",
-		detect: () => runCapture("claude", ["--version"]).ok || existsSync(join(homedir(), ".claude.json")),
+		detect: () => existsSync(CLAUDE_HOME),
 		configure: () => {
-			const existing = runCapture("claude", ["mcp", "get", SERVER_NAME]);
-			if (existing.ok) return "already";
+			if (runCapture("claude", ["mcp", "get", SERVER_NAME]).ok) return "already";
 			const add = runCapture("claude", ["mcp", "add", "--scope", "user", SERVER_NAME, "--", NODE_BIN, CLI_PATH, "mcp"]);
-			return add.ok ? "configured" : "failed";
+			if (add.ok) return "configured";
+			console.log(`    Run manually: ${manualCommand}`);
+			return "manual";
 		},
 		remove: () => (runCapture("claude", ["mcp", "remove", "-s", "user", SERVER_NAME]).ok ? "removed" : "failed"),
 	};
 }
 
 function codexTarget(): Target {
-	const configPath = join(homedir(), ".codex", "config.toml");
+	const configPath = join(CODEX_HOME, "config.toml");
 	return {
 		id: "codex",
 		label: "Codex CLI",
-		detect: () => existsSync(join(homedir(), ".codex")),
+		detect: () => existsSync(CODEX_HOME),
 		configure: () => {
 			const content = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+			const hadServer = content.includes(`[mcp_servers.${SERVER_NAME}]`);
 			const next = upsertTomlServer(content, SERVER_NAME, buildServerEntry());
 			mkdirSync(dirname(configPath), { recursive: true });
 			writeFileSync(configPath, next);
-			return content.includes(`[mcp_servers.${SERVER_NAME}]`) ? "already" : "configured";
+			return hadServer ? "already" : "configured";
 		},
 		remove: () => {
 			if (!existsSync(configPath)) return "not-detected";
-			const next = stripTomlServer(readFileSync(configPath, "utf8"), SERVER_NAME);
-			writeFileSync(configPath, next);
+			writeFileSync(configPath, stripTomlServer(readFileSync(configPath, "utf8"), SERVER_NAME));
 			return "removed";
 		},
 	};
@@ -225,21 +238,41 @@ function jsonTarget(
 	};
 }
 
-function piTarget(): Target {
+function clineSettingsCandidates(): string[] {
+	const relative = join("User", "globalStorage", "saoudrizwan.claude-dev", "settings");
+	const base =
+		platform() === "darwin"
+			? join(homedir(), "Library", "Application Support")
+			: IS_WINDOWS
+				? appDataDir()
+				: join(homedir(), ".config");
+	return [join(base, "Code", relative), join(base, "Code - Insiders", relative), join(base, "VSCodium", relative)];
+}
+
+function clineTarget(): Target {
+	const candidates = clineSettingsCandidates();
+	const dir = candidates.find((candidate) => existsSync(candidate)) ?? (candidates[0] as string);
+	const file = join(dir, "cline_mcp_settings.json");
 	return {
-		id: "pi",
-		label: "Pi (native extension)",
-		detect: () => runCapture("pi", ["--version"]).ok || existsSync(join(homedir(), ".pi", "agent")),
-		configure: () => "manual",
-		remove: () => "manual",
-		manualNote:
-			"Pi uses the native extension, not MCP: `pi install npm:pi-second-brain` (after publish) or `pi install /path/to/pi-second-brain`.",
+		id: "cline",
+		label: "Cline (VS Code)",
+		detect: () => candidates.some((candidate) => existsSync(candidate)),
+		configure: () => {
+			const outcome = upsertJsonMcpServer(file, ["mcpServers", SERVER_NAME], {
+				...buildServerEntry(),
+				disabled: false,
+				autoApprove: READ_ONLY_TOOLS,
+			});
+			return outcome === "unchanged" ? "already" : "configured";
+		},
+		remove: () => (removeJsonMcpServer(file, ["mcpServers", SERVER_NAME]) === "removed" ? "removed" : "not-detected"),
 	};
 }
 
 function buildTargets(): Target[] {
 	const entry = buildServerEntry();
 	return [
+		piTarget(),
 		claudeTarget(),
 		codexTarget(),
 		jsonTarget(
@@ -250,14 +283,7 @@ function buildTargets(): Target[] {
 			["mcpServers", SERVER_NAME],
 			entry,
 		),
-		jsonTarget(
-			"cline",
-			"Cline (VS Code)",
-			clineSettingsDir() ?? "",
-			join(clineSettingsDir() ?? ".", "cline_mcp_settings.json"),
-			["mcpServers", SERVER_NAME],
-			{ ...entry, disabled: false, autoApprove: READ_ONLY_TOOLS },
-		),
+		clineTarget(),
 		jsonTarget(
 			"gemini",
 			"Gemini CLI",
@@ -269,18 +295,17 @@ function buildTargets(): Target[] {
 		jsonTarget(
 			"opencode",
 			"OpenCode",
-			join(homedir(), ".config", "opencode"),
-			opencodeConfigPath(),
+			join(XDG_CONFIG_HOME, "opencode"),
+			join(XDG_CONFIG_HOME, "opencode", "opencode.json"),
 			["mcp", SERVER_NAME],
 			{ type: "local", command: [entry.command, ...entry.args], enabled: true },
 		),
-		piTarget(),
 	];
 }
 
-// --- Command dispatch ----------------------------------------------------------------
+// --- Command dispatch ----------------------------------------------------------------------------
 
-const FLAGS = ["claude", "codex", "cursor", "cline", "gemini", "opencode", "pi"] as const;
+const FLAGS = ["pi", "claude", "codex", "cursor", "cline", "gemini", "opencode"] as const;
 type FlagId = (typeof FLAGS)[number];
 
 function parse(argv: string[]): { command: string; ids: FlagId[]; all: boolean } {
@@ -301,14 +326,16 @@ function printHelp(): void {
 	console.log(`pi-second-brain — local-first RAG knowledge base for coding agents
 
 Usage:
-  pi-second-brain mcp                Run the MCP stdio server (this is what harnesses launch)
-  pi-second-brain setup [flags]      Register the MCP server into harnesses
+  pi-second-brain mcp                Run the MCP stdio server (this is what other harnesses launch)
+  pi-second-brain setup [flags]      Register into harnesses (Pi: runs \`pi install\` on this package)
   pi-second-brain remove [flags]     Undo registration
   pi-second-brain list               Show detected harnesses
 
 Flags: --all | ${FLAGS.map((flag) => `--${flag}`).join(" ")}
 
-Pi uses the native extension instead of MCP: pi install /path/to/pi-second-brain`);
+Pi uses the native extension — exactly like the maintainer's own setup:
+  git clone https://github.com/myusufalghifari10/pi-second-brain.git
+  pi install /absolute/path/to/pi-second-brain`);
 }
 
 async function main(): Promise<number> {
@@ -352,7 +379,7 @@ async function main(): Promise<number> {
 		console.log("No harness flags given. Detected on this machine:");
 		console.log(detected.length > 0 ? `  ${detected.join(" ")}` : "  (none)");
 		console.log(
-			`\nRe-run with --all or with specific flags, e.g.: pi-second-brain setup ${detected.join(" ") || "--claude"}`,
+			`\nRe-run with --all or with specific flags, e.g.: pi-second-brain setup ${detected.join(" ") || "--pi"}`,
 		);
 		return 0;
 	}
@@ -366,7 +393,8 @@ async function main(): Promise<number> {
 		}
 		try {
 			const status = command === "setup" ? target.configure() : target.remove();
-			const note = target.manualNote ? `\n    ${target.manualNote}` : "";
+			const note =
+				target.manualNote && (status === "manual" || status === "failed") ? `\n    ${target.manualNote}` : "";
 			console.log(`- ${target.label}: ${status}${note}`);
 			if (status === "failed") failed += 1;
 		} catch (error) {

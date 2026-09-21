@@ -103,34 +103,38 @@ Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result 
 
 ## Install
 
-No build-from-source ceremony: one command teaches your agent the doctrine, one command gives it the
-actual tools. Every harness shares the same brain (`~/.pi/knowledge`).
+Two paths by design: **on Pi it's a native extension + skill; everywhere else it's an MCP server +
+skill.** All surfaces share the same brain (`~/.pi/knowledge`), so switching harnesses never means
+re-indexing.
 
-### 1. The skill (any of 75+ harnesses)
+### On Pi — native extension + skill (the maintainer's own setup, verbatim)
 
 ```bash
-npx skills add myusufalghifari10/pi-second-brain
+git clone https://github.com/myusufalghifari10/pi-second-brain.git
+pi install /absolute/path/to/pi-second-brain
 ```
 
-Installs the usage doctrine into Claude Code, Cursor, Codex, OpenCode, and [75 more agents](https://github.com/vercel-labs/skills)
-via the [skills CLI](https://github.com/vercel-labs/skills). The skill also teaches your agent to
-bootstrap the engine itself (next step) — so you can literally paste the skill install into your
-agent and let it do the rest.
+Pi loads the extension directly: the full 13 `knowledge_*` tools, TUI rendering, per-session
+lifecycle, file watcher, and opt-in context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`). The
+packaged search-docs skill ships with it — no MCP, no extra steps.
 
-### 2. The engine (real tools over MCP)
+### Everywhere else — MCP server + skill
 
 ```bash
 npm install -g github:myusufalghifari10/pi-second-brain
-pi-second-brain setup --all
-pi-second-brain list        # verify what was detected
+pi-second-brain setup --all     # or pick: --claude --codex --cursor --cline --gemini --opencode
+pi-second-brain list            # verify what was detected
+npx skills add myusufalghifari10/pi-second-brain   # usage doctrine in 75+ harnesses (optional)
 ```
 
-`setup` auto-registers the MCP server into the harnesses it finds — `claude mcp add` for Claude Code,
+`setup` writes each harness's native config — `claude mcp add` for Claude Code,
 `[mcp_servers.pi-second-brain]` in `~/.codex/config.toml`, `~/.cursor/mcp.json`, Cline's
-`cline_mcp_settings.json`, Gemini CLI's `settings.json`, and OpenCode's `opencode.json`. Re-run any
-time to update; `pi-second-brain remove --all` undoes everything. Restart your harness afterwards.
+`cline_mcp_settings.json` (read-only tools auto-approved), Gemini CLI's `settings.json`, and
+OpenCode's `opencode.json`. Detection is config-directory based (it respects `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME`), works on Linux, macOS, and Windows, and is idempotent — re-run any time to update;
+`pi-second-brain remove --all` undoes everything. Restart your harness afterwards.
 
-### 3. Manual, per harness
+### Manual, per harness
 
 <details>
 <summary>Claude Code</summary>
@@ -162,25 +166,16 @@ which writes the exact format each one expects.
 
 </details>
 
-<details>
-<summary>Pi (native extension — recommended on Pi)</summary>
-
-```bash
-pi install /absolute/path/to/pi-second-brain
-```
-
-Pi loads the extension directly: same tools, plus TUI rendering, per-session lifecycle, and opt-in
-context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`).
-
-</details>
-
 > An npm registry package is planned; until then, install from GitHub as shown above.
 
-### 4. Or just paste this to your agent
+### Or just paste this to your agent
 
 ```text
-Install pi-second-brain for me: npm install -g github:myusufalghifari10/pi-second-brain,
-then run pi-second-brain setup --all, then verify with pi-second-brain list.
+Install pi-second-brain for me.
+If I am running Pi: git clone https://github.com/myusufalghifari10/pi-second-brain.git,
+then run: pi install <the cloned absolute path>.
+Otherwise: npm install -g github:myusufalghifari10/pi-second-brain,
+then: pi-second-brain setup --all, then verify with pi-second-brain list.
 ```
 
 ## Usage
