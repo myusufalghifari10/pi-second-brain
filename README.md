@@ -2,15 +2,14 @@
 
 **A local-first RAG knowledge base for the [Pi](https://pi.dev) coding agent — your agent's second brain.**
 
-Index codebases, docs, PDFs, arXiv papers, URLs, and notes into persistent knowledge bases, then let your agent search them across sessions — by meaning, by exact symbol, by **formula**, or by **number**. 100% local: SQLite + FTS5, ONNX embeddings, zero API keys, zero telemetry.
+One local index that can hold **anything** — codebases, documentation, scientific papers, LaTeX, PDFs, websites, Obsidian vaults, plain notes — and search it the way you actually think: by **meaning**, by **exact symbol**, by **formula**, by **number**, by **table row**, or by **reference label**. SQLite + FTS5 + ONNX embeddings on your machine. No API keys, no telemetry, no cloud.
 
-```
-577 passing tests · 48/48 golden-eval gate (recall@5 = 100%) · 22+ adversarial audit rounds · 13 tools
-```
+*Code · Docs · PDFs · arXiv papers · LaTeX · URLs · Obsidian · Math · Chemistry — one private index.*
 
-> **Provenance.** `pi-second-brain` is an independently maintained, heavily hardened fork of
-> [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) (v0.10.1 base). The runtime namespace is kept for
-> compatibility: environment variables stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
+> **Provenance.** `pi-second-brain` is an independently maintained fork of
+> [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) (v0.10.1 base), extended with a science/math
+> retrieval layer and a much broader ingestion pipeline. The runtime namespace is kept for compatibility:
+> environment variables stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
 
 ---
 
@@ -18,76 +17,112 @@ Index codebases, docs, PDFs, arXiv papers, URLs, and notes into persistent knowl
 
 Coding agents lose project context between sessions and cannot fit a repository into one prompt. pi-second-brain gives Pi durable, searchable project memory:
 
-- **Search by meaning** — hybrid BM25 + vector embeddings with weighted score fusion; conceptual queries find code/docs even when the wording differs.
-- **Search by evidence** — `fast` mode for exact symbols, identifiers, error codes, and numbers; `knowledge_symbol_search` for functions, classes, config keys, and headings.
-- **Search science documents the way they're written** — math notation, chemical formulas, engineering units, LaTeX labels, and PDF tables are all first-class retrieval targets.
-- **Stay private** — everything runs on your machine. No project file is ever modified; indexes live under `~/.pi/knowledge/`.
+- **Search by meaning** — hybrid BM25 + vector embeddings with weighted score fusion; conceptual queries find code and docs even when the wording differs.
+- **Search by evidence** — exact symbols, identifiers, error codes, config keys, and bare numbers like `11.94` or `H2SO4`.
+- **Ask science documents real questions** — math notation, chemical formulas, engineering units, LaTeX cross-references, and PDF tables are first-class retrieval targets, not glyph soup.
+- **Stay private** — everything runs locally. No project file is ever modified; indexes live under `~/.pi/knowledge/`.
 
-## What this fork adds over upstream
+## Index anything
 
-The fork started from a working core and went through three engineering campaigns:
+| You have | What the indexer does |
+|----------|----------------------|
+| **Source code** | Recursive AST chunking (tree-sitter) for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML — functions, classes, and namespaces become retrievable units with symbol metadata |
+| **Markdown & notes** | Heading breadcrumbs, atomic fenced code and tables, Obsidian frontmatter (`title`/`tags`/`aliases`) and `[[wikilinks]]` as metadata |
+| **Scientific PDFs** | Optional `marker`/`docling` sidecar converts to Markdown **with `$$…$$` LaTeX math**, cached by content hash; fail-open to built-in text-layer extraction; figures are persisted and caption-less images get OCR'd (optional tesseract) |
+| **PDF tables** | Table blocks keep their introducing narrative sentence, and every data row is stamped `Row: <label> |` — a query for a bare number returns the row *with its method name* |
+| **LaTeX** | First-class `.tex` support: section breadcrumbs, `\label` metadata, and a **label graph** that resolves `\ref`/`\eqref`/`\cref` targets per scope — collisions resolve as *unresolved*, never wrong |
+| **Websites** | URL ingestion with re-index support |
+| **DOCX / plain text** | Extracted and chunked like everything else |
 
-**Science & math retrieval layer** (L1–L4)
-- Math-aware chunking: display math (`$$`, ```` ```math ````, `\begin{equation}`, `\[..\]`), pipe tables, and fenced code are atomic — never split mid-structure.
-- Cross-notation matching: `x²` ⇔ `x^2`, `α` ⇔ `\alpha`, `≤` ⇔ `\leq` — canonicalized symmetrically on index and query.
-- **Formula retrieval**: a dedicated formula index matches query formulas like `$E=mc^{2}$` against indexed display formulas; exact and fuzzy matches boost results or inject formula-only chunks with `match_reason: "formula"`.
-- **Chemistry**: `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}` — unicode subscripts, charges, hydrate dots, arrows, and parenthesized groups unify into one case-sensitive signature (`Co` never matches `CO`).
-- **Units**: `N·m` ≡ `N m` in keyword search, over a frozen conservative SI unit list.
-- **Numeric token symmetry**: `11.94` is one token; `shell-2` ≡ `shell 2`; `2,056` ≡ `2056` — numbers in tables and prose are now fast-mode searchable.
-- **PDF table intelligence**: table blocks keep their introducing narrative sentence (`Context:` line) and every data row is stamped `Row: <label> |`, so a query for a bare number returns the row **with its method name**.
-- **LaTeX label graph**: `\label`/`\ref` resolve through scope keys — a query naming a label retrieves or boosts the defining/referenced chunks; collisions resolve as *unresolved*, never wrong.
-- Optional PDF sidecar (`marker` / `docling`, fail-open to `unpdf`), content-hash conversion cache, image persistence + optional tesseract OCR for caption-less figures.
+Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result diagnostics.
 
-**Retrieval & agent UX**
-- `expand_neighbors` — opt-in adjacent-chunk context (`context[]` with `prev`/`next` relations) on the top hit.
-- Adaptive context windows, MMR-style diversity reranking, optional cross-encoder reranking (`deep` mode), confidence gating against false positives.
-- File watcher auto-reindexing (`PI_KNOWLEDGE_WATCH=true`), opt-in context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`), `knowledge_doctor` health scoring with concrete repair actions.
-- Obsidian vault support: frontmatter `title`/`tags`/`aliases` and `[[wikilinks]]` become chunk metadata.
+## Search it any way you think
 
-**Hardening & verification**
-- **22+ adversarial audit rounds** run by independent AI reviewer/worker subagents: ≈120 defects found and fixed — including a silent reranker failure that collapsed every deep-mode score to 0, a watcher race that lost file changes, tokenization asymmetries (`H2O` unfindable in fast mode), and AST indexing holes (TS namespaces, C++ function-pointer members).
-- **Feature verification campaign**: 56/56 checks across the full feature matrix (ingest, search, lifecycle, watcher, doctor, export/import).
-- **Blind paper exams** (dogfood): three arXiv PDFs ingested *unread* — then 10 hard technical questions each, answered using retrieval only. Graded 8.5/10 on the first paper and 9.5/10 on the second, with every unverifiable claim flagged instead of guessed.
-- A byte-deterministic **golden eval harness** (`npm run eval`, 48/48 queries, recall@5 = 100%) as a hard release gate: any indexing or ranking change that flips a golden result fails visibly.
+- **By meaning** — *"how does the watcher handle overlapping updates?"* finds the right code even with different wording.
+- **By symbol** — `knowledge_symbol_search` pins down functions, classes, config keys, and env vars before broader search.
+- **By formula** — query `$E=mc^{2}$` or `\int_0^\infty e^{-x^2}dx` against a dedicated formula index; exact and fuzzy matches boost results or inject formula-only chunks.
+- **By chemistry** — `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}`; unicode subscripts, charges, hydrate dots, and arrows unify into one case-sensitive signature (`Co` never matches `CO`).
+- **By number** — `11.94` is one token, `shell-2` ≡ `shell 2`, `2,056` ≡ `2056`; numbers inside PDF tables arrive together with their row label.
+- **By math notation** — `x²` ⇔ `x^2`, `α` ⇔ `\alpha`, `≤` ⇔ `\leq`, matched symmetrically on index and query.
+- **By unit** — `N·m` ≡ `N m` over a conservative frozen SI unit list.
+- **By reference** — *"what does eq. 11 depend on?"* rides the LaTeX label graph to the defining chunk.
 
 ## Highlights
 
-- **Local-first** — indexes under `~/.pi/knowledge/`; local ONNX embeddings (no API key); explicit offline mode.
-- **Hybrid retrieval** — lexical-anchored BM25 + dense vectors, normalized weighted score fusion, six modes (`fast` / `semantic` / `hybrid` / `deep` / `adaptive` / `auto`) plus intent aliases (`code`, `config`, `errors`, `docs`, `decision`).
-- **Code-aware indexing** — recursive AST chunking (tree-sitter) for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML; symbol index for methods, classes, config keys, and headings.
-- **Document-aware indexing** — Markdown headings/breadcrumbs, LaTeX sections, PDF (sidecar or text-layer), DOCX, URLs, plain text.
-- **Large-project stability** — persisted indexing progress, capped batches, streamed vector scans, stuck-job detection, incremental updates.
-- **Diagnosable** — per-result provenance (chunk id, match reason, score, freshness), ranking diagnostics, `knowledge_status`, `knowledge_doctor`.
+- **Hybrid retrieval, six modes** — `fast` / `semantic` / `hybrid` / `deep` / `adaptive` / `auto`, plus intent aliases (`code`, `config`, `errors`, `docs`, `decision`) and tuning profiles (`low_token`, `precision`, `recall`, `long_context`).
+- **Ranking quality built in** — optional cross-encoder reranking (`deep`), MMR-style diversity reranking, adaptive context windows, confidence gating that returns *nothing* instead of unrelated chunks.
+- **Context on demand** — `expand_neighbors` attaches adjacent chunks (`prev`/`next`) to the top hit when the answer needs surrounding context.
+- **Always current** — file watcher auto-reindexing (`PI_KNOWLEDGE_WATCH=true`), incremental updates, opt-in auto-injection of relevant knowledge before every answer (`PI_KNOWLEDGE_AUTO_INJECT=true`).
+- **Self-diagnosing** — `knowledge_status` and `knowledge_doctor` report staleness, orphans, stuck jobs, and missing vectors with concrete repair actions.
+- **Large-project stability** — persisted indexing progress, capped batches, streamed vector scans, ETA reporting.
+- **Portable** — export any KB to JSONL, re-embed on import.
+- **Local models** — ONNX embeddings (~118 MB, cached once) and an optional local cross-encoder reranker; or point at any OpenAI-compatible API if you prefer.
+
+## Feature Comparison
+
+| Feature | pi-second-brain | kiro-cli knowledge | pi-memory |
+|---------|:---:|:---:|:---:|
+| Index arbitrary files/dirs/URLs | ✅ | ✅ | ❌ |
+| Multiple named knowledge bases | ✅ | ✅ | ❌ |
+| Semantic (vector) search | ✅ | ✅ | ✅ (via qmd) |
+| BM25 keyword search | ✅ | ✅ | ✅ (via qmd) |
+| **Hybrid search + weighted score fusion** | ✅ | ❌ | partial |
+| **Cross-encoder reranking** | ✅ | ❌ | ❌ |
+| **Adaptive contextual search** | ✅ | ❌ | ❌ |
+| **Diversity reranking (MMR-style)** | ✅ | ❌ | ❌ |
+| **Adjacent-chunk context expansion** | ✅ | ❌ | ❌ |
+| **Incremental re-indexing** | ✅ | ❌ | ❌ |
+| **File watcher (auto-update)** | ✅ | ❌ | ❌ |
+| **Code-aware chunking (10 languages)** | ✅ | ❌ | ❌ |
+| **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
+| **Math notation matching** (`x²` ⇔ `x^2`) | ✅ | ❌ | ❌ |
+| **Query-by-formula retrieval** | ✅ | ❌ | ❌ |
+| **Chemistry normalization** (`H2SO4` ≡ `H₂SO₄` ≡ `\ce{}`) | ✅ | ❌ | ❌ |
+| **Engineering unit matching** (`N·m` ≡ `N m`) | ✅ | ❌ | ❌ |
+| **Numeric token search** (`2,056` ≡ `2056`) | ✅ | ❌ | ❌ |
+| **PDF math sidecar (marker/docling) + cache** | ✅ | ❌ | ❌ |
+| **PDF table→narrative coupling + row labels** | ✅ | ❌ | ❌ |
+| **PDF image persistence + OCR captions** | ✅ | ❌ | ❌ |
+| **LaTeX label graph** (`\ref` resolution) | ✅ | ❌ | ❌ |
+| **Obsidian frontmatter/wikilink metadata** | ✅ | ❌ | ❌ |
+| **Local embeddings (zero API)** | ✅ | ❌ | ✅ (via qmd) |
+| **Index quality diagnostics + health score** | ✅ | ❌ | ❌ |
+| **Metadata filters in search** | ✅ | ❌ | ❌ |
+| **Progress reporting + stuck-job detection** | ✅ | partial | ❌ |
+| **Portable JSONL export/import** | ✅ | ❌ | ❌ |
+| Cross-session persistence | ✅ | ✅ | ✅ |
+| Pi extension native | ✅ | N/A | ✅ |
+| Context injection per turn | ✅ | ❌ | ✅ |
+| RPC mode support | ✅ | N/A | N/A |
 
 ## Quick Start
 
 Requirements: Node ≥ 22. Model weights (~150 MB) download once and are cached locally.
 
 ```bash
-# Install into Pi from a local clone
 git clone https://github.com/myusufalghifari10/pi-second-brain.git
 pi install /absolute/path/to/pi-second-brain
 ```
+
+> An npm package is planned; for now, install from a local clone.
 
 Then just talk to your agent:
 
 ```
 > Index my project at ~/work/my-app as "my-app"
 > Search my knowledge base for "authentication flow"
-> What does the formula index say about \int_0^\infty e^{-x^2}dx ?
+> Find the formula \int_0^\infty e^{-x^2}dx in my papers
 > Which table reports the 62.86 number, and for which method?
 ```
 
-Optional integrations:
+Optional extras:
 
 ```bash
-pip install marker-pdf        # or: pip install docling  — better PDF math extraction (auto-detected, fail-open)
-sudo pacman -S tesseract      # or apt install tesseract-ocr — OCR for caption-less PDF figures
+pip install marker-pdf        # or: pip install docling — better PDF math extraction (auto-detected, fail-open)
+sudo pacman -S tesseract      # or: apt install tesseract-ocr — OCR for caption-less PDF figures
 export PI_KNOWLEDGE_WATCH=true        # auto re-index watched directory KBs
 export PI_KNOWLEDGE_AUTO_INJECT=true  # agent auto-searches relevant knowledge before answering
 ```
-
-OMP compatibility is inherited through the same packaged `extension.js` entry (`omp install /path`).
 
 ## Tools
 
@@ -115,8 +150,6 @@ OMP compatibility is inherited through the same packaged `extension.js` entry (`
 | `adaptive` | When the answer needs neighboring chunks / surrounding implementation context |
 | `deep` | High-stakes answers — hybrid + cross-encoder reranking |
 | `auto` | Lets the engine pick and retry alternate modes on weak results |
-
-Profiles (`low_token`, `precision`, `recall`, `long_context`) tune result count, snippet length, and rerank breadth; explicit parameters always win.
 
 ## Configuration
 
@@ -151,15 +184,13 @@ npm install
 npm run typecheck
 npm test                        # unit suite
 npm run build
-npm run eval -- --fixture       # deterministic golden gate (must be 48/48)
+npm run eval -- --fixture       # deterministic golden-eval release gate
 npm run test:e2e                # smoke; PDF/DOCX cases need fixture env vars
 ```
 
-The release gate is explicit: `check` → `typecheck` → unit tests → build → golden eval → e2e. Any skipped gate must be reported, never assumed.
-
 ## Acknowledgments
 
-Built on [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) — thank you for the excellent foundation. All science-layer, hardening, and verification work in this fork is independent.
+Built on [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) — thank you for the excellent foundation.
 
 ## License
 
