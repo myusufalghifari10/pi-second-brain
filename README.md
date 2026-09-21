@@ -1,295 +1,165 @@
 # pi-second-brain
 
-Local-first RAG knowledge base for Pi and OMP coding agents.
+**A local-first RAG knowledge base for the [Pi](https://pi.dev) coding agent — your agent's second brain.**
 
-> **pi-second-brain** is an independently maintained, heavily hardened fork of
-> [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) (v0.10.1 base). It adds math/chemistry/unit-aware
-> chunking, LaTeX-formula retrieval, theorem/label graphs, PDF sidecar (Marker/Docling) + OCR ingestion, an
-> eval harness, and 22 rounds of adversarial audit fixes. The runtime namespace is kept for compatibility:
-> env vars stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
+Index codebases, docs, PDFs, arXiv papers, URLs, and notes into persistent knowledge bases, then let your agent search them across sessions — by meaning, by exact symbol, by **formula**, or by **number**. 100% local: SQLite + FTS5, ONNX embeddings, zero API keys, zero telemetry.
 
-Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi and [OMP](https://omp.sh/) can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
+```
+577 passing tests · 48/48 golden-eval gate (recall@5 = 100%) · 22+ adversarial audit rounds · 13 tools
+```
 
-Built as a native [Pi extension](https://pi.dev/docs/latest/extensions) with verified [OMP](https://omp.sh/) compatibility through the packaged extension entry. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
+> **Provenance.** `pi-second-brain` is an independently maintained, heavily hardened fork of
+> [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) (v0.10.1 base). The runtime namespace is kept for
+> compatibility: environment variables stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
 
-## Why It Matters
+---
 
-Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi and OMP durable, searchable project memory:
+## Why
 
-- Search code and documentation by meaning, exact symbols, or both.
-- Look up lightweight code symbols, Markdown headings, config keys, and environment variables before broader search.
-- Keep private source data local by default.
-- Re-index changed files incrementally.
-- Diagnose stale, stuck, or low-quality indexes.
-- Handle large repositories with persisted progress instead of silent hangs.
+Coding agents lose project context between sessions and cannot fit a repository into one prompt. pi-second-brain gives Pi durable, searchable project memory:
 
-Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes **your existing files** and makes them semantically searchable by the agent.
+- **Search by meaning** — hybrid BM25 + vector embeddings with weighted score fusion; conceptual queries find code/docs even when the wording differs.
+- **Search by evidence** — `fast` mode for exact symbols, identifiers, error codes, and numbers; `knowledge_symbol_search` for functions, classes, config keys, and headings.
+- **Search science documents the way they're written** — math notation, chemical formulas, engineering units, LaTeX labels, and PDF tables are all first-class retrieval targets.
+- **Stay private** — everything runs on your machine. No project file is ever modified; indexes live under `~/.pi/knowledge/`.
+
+## What this fork adds over upstream
+
+The fork started from a working core and went through three engineering campaigns:
+
+**Science & math retrieval layer** (L1–L4)
+- Math-aware chunking: display math (`$$`, ```` ```math ````, `\begin{equation}`, `\[..\]`), pipe tables, and fenced code are atomic — never split mid-structure.
+- Cross-notation matching: `x²` ⇔ `x^2`, `α` ⇔ `\alpha`, `≤` ⇔ `\leq` — canonicalized symmetrically on index and query.
+- **Formula retrieval**: a dedicated formula index matches query formulas like `$E=mc^{2}$` against indexed display formulas; exact and fuzzy matches boost results or inject formula-only chunks with `match_reason: "formula"`.
+- **Chemistry**: `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}` — unicode subscripts, charges, hydrate dots, arrows, and parenthesized groups unify into one case-sensitive signature (`Co` never matches `CO`).
+- **Units**: `N·m` ≡ `N m` in keyword search, over a frozen conservative SI unit list.
+- **Numeric token symmetry**: `11.94` is one token; `shell-2` ≡ `shell 2`; `2,056` ≡ `2056` — numbers in tables and prose are now fast-mode searchable.
+- **PDF table intelligence**: table blocks keep their introducing narrative sentence (`Context:` line) and every data row is stamped `Row: <label> |`, so a query for a bare number returns the row **with its method name**.
+- **LaTeX label graph**: `\label`/`\ref` resolve through scope keys — a query naming a label retrieves or boosts the defining/referenced chunks; collisions resolve as *unresolved*, never wrong.
+- Optional PDF sidecar (`marker` / `docling`, fail-open to `unpdf`), content-hash conversion cache, image persistence + optional tesseract OCR for caption-less figures.
+
+**Retrieval & agent UX**
+- `expand_neighbors` — opt-in adjacent-chunk context (`context[]` with `prev`/`next` relations) on the top hit.
+- Adaptive context windows, MMR-style diversity reranking, optional cross-encoder reranking (`deep` mode), confidence gating against false positives.
+- File watcher auto-reindexing (`PI_KNOWLEDGE_WATCH=true`), opt-in context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`), `knowledge_doctor` health scoring with concrete repair actions.
+- Obsidian vault support: frontmatter `title`/`tags`/`aliases` and `[[wikilinks]]` become chunk metadata.
+
+**Hardening & verification**
+- **22+ adversarial audit rounds** run by independent AI reviewer/worker subagents: ≈120 defects found and fixed — including a silent reranker failure that collapsed every deep-mode score to 0, a watcher race that lost file changes, tokenization asymmetries (`H2O` unfindable in fast mode), and AST indexing holes (TS namespaces, C++ function-pointer members).
+- **Feature verification campaign**: 56/56 checks across the full feature matrix (ingest, search, lifecycle, watcher, doctor, export/import).
+- **Blind paper exams** (dogfood): three arXiv PDFs ingested *unread* — then 10 hard technical questions each, answered using retrieval only. Graded 8.5/10 on the first paper and 9.5/10 on the second, with every unverifiable claim flagged instead of guessed.
+- A byte-deterministic **golden eval harness** (`npm run eval`, 48/48 queries, recall@5 = 100%) as a hard release gate: any indexing or ranking change that flips a golden result fails visibly.
 
 ## Highlights
 
-- **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
-- **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
-- **Code-aware indexing**: recursive AST chunking for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML, with bounded fallback chunks for oversized declarations.
-- **Math and science-aware indexing**: display math, pipe tables, and fenced code stay atomic during chunking; math notation is matched across notations (`x²` ⇔ `x^2`, `α` ⇔ `\alpha`, `≤` ⇔ `\leq`); `.tex` files get LaTeX-aware section chunking.
-- **Lightweight symbol lookup**: indexes functions, methods, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
-- **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
-- **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
-- **Private by default**: local embeddings run without an API key.
-
-## Feature Comparison
-
-| Feature | pi-knowledge | kiro-cli knowledge | pi-memory |
-|---------|:---:|:---:|:---:|
-| Index arbitrary files/dirs | ✅ | ✅ | ❌ |
-| Multiple named knowledge bases | ✅ | ✅ | ❌ |
-| Semantic (vector) search | ✅ | ✅ | ✅ (via qmd) |
-| BM25 keyword search | ✅ | ✅ | ✅ (via qmd) |
-| **Hybrid search + weighted score fusion** | ✅ | ❌ | partial |
-| **Cross-encoder reranking** | ✅ | ❌ | ❌ |
-| **Adaptive contextual search** | ✅ | ❌ | ❌ |
-| **Diversity reranking** | ✅ | ❌ | ❌ |
-| **Incremental re-indexing** | ✅ | ❌ | ❌ |
-| **File watcher (auto-update)** | ✅ | ❌ | ❌ |
-| **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java/Bash/C/C++/QML) | ❌ | ❌ |
-| **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
-| **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
-| **Index quality diagnostics** | ✅ | ❌ | ❌ |
-| **Metadata filters in search** | ✅ | ❌ | ❌ |
-| **Progress reporting + stuck indexing diagnostics** | ✅ | partial | ❌ |
-| Cross-session persistence | ✅ | ✅ | ✅ |
-| Pi extension native | ✅ | N/A | ✅ |
-| Context injection per turn | ✅ | ❌ | ✅ |
-| Search result TUI rendering | ✅ | N/A | ❌ |
-| Full tool TUI rendering | partial | N/A | ❌ |
-| RPC mode support | ✅ | N/A | N/A |
-
-TUI rendering currently uses Pi's stable default tool rendering plus targeted result formatting. A fuller custom renderer is intentionally not enabled yet because custom renderers must be width-safe across terminal sizes and Pi TUI modes.
-
-## Research-Backed Retrieval
-
-`pi-knowledge` turns retrieval research into product behavior that agents can actually use:
-
-- **RAG-native project memory**: follows the Retrieval-Augmented Generation pattern from Lewis et al. 2020: keep source truth outside the model, retrieve it at answer time, and inject only relevant context.
-- **Dense semantic recall**: uses multilingual dense embeddings in the spirit of Dense Passage Retrieval (Karpukhin et al. 2020), so conceptual queries can find code/docs even when wording differs.
-- **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and AST-derived code structure such as symbols, scope, parent symbol, and signatures with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
-- **Hybrid retrieval with diagnosable scores**: combines lexical BM25 anchors and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
-- **MMR-style diversity**: uses Maximal Marginal Relevance ideas (Goldstein and Carbonell 1998), file interleaving, vector redundancy checks, and bounded adaptive-window overlap collapse so repeated README or same-file chunks do not dominate top results. Code KBs with AST metadata can also use same-parent/sibling structure during adaptive expansion.
-- **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
-- **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks, reducing false confidence when the KB does not contain the answer.
-
-This is intentionally not a heavy ColBERT-style late-interaction index yet (Khattab and Zaharia 2020). The current product chooses lightweight local embeddings, BM25, query-aware ranking, optional cross-encoder reranking, streamed vector scans, and health diagnostics for commercial usefulness with low setup cost.
-
-Math and science documents get structure-preserving retrieval: display math blocks (`$$`, ` ```math ` fences, `\begin{equation}`-family environments, `\[..\]`), pipe tables, and fenced code are chunked as atomic units and never split mid-structure. Lexical search matches across notations because the FTS tokenizer canonicalizes math unicode (Greek letters, operators, relations, super/subscripts) onto the same plain words as their LaTeX commands, symmetrically for indexed chunks and queries. Obsidian-style vault notes also benefit: frontmatter `title`/`tags`/`aliases` and `[[wikilinks]]` become chunk metadata and embedding context. LaTeX (`.tex`, `.ltx`, `.latex`) is a first-class `latex` file type with `\chapter`/`\section`-family breadcrumbs and `\label` metadata; run `knowledge_update` after upgrading so existing Markdown and LaTeX chunks pick up the richer units and metadata.
-
-Scientific PDFs get the same treatment when an optional converter sidecar is installed: with `marker` (`pip install marker-pdf`) or `docling` (`pip install docling`) available, PDF extraction converts the document to Markdown with `$$…$$` LaTeX math before math-aware chunking, so formulas and structure survive instead of degrading into raw-text glyph soup. The sidecar is auto-detected and strictly optional — missing, failing, or timing-out conversions fail open to the built-in unpdf text extraction — and conversions are cached by content hash so `knowledge_update` never re-converts an unchanged PDF. See the `PI_KNOWLEDGE_PDF_*` variables in [docs/configuration.md](docs/configuration.md).
-
-When the query itself contains a formula — `$E=mc^{2}$`, `\[\int_0^\infty e^{-x^2}dx\]`, or a segment with multiple bare TeX commands — `knowledge_search` matches it against a dedicated formula index built from chunk display formulas. Indexed and query formulas are normalized to the same lexical-structural token signature: layout commands, style wrappers (`\dfrac`, `\mathrm`), spacing, braces, math unicode, and TeX aliases (`\le` ⇔ `\leq`, `α` ⇔ `\alpha`) are canonicalized without AST parsing, so cosmetic variants match while structurally different formulas do not. Exact and fuzzy formula matches boost already-retrieved chunks and inject up to 5 formula-only chunks with `match_reason: "formula"`; queries without math keep byte-identical results. After upgrading, each knowledge base backfills its formula index once on the first formula-bearing query, so large KBs answer that first math query slower.
-
-Chemistry notation joins the same formula index: `\ce{…}` (mhchem-style) inputs and plain molecular formulas route through a dedicated chemistry normalizer inside the formula normalization entry point, so `H2SO4` ≡ `H₂SO₄` ≡ `\ce{H2SO4}` ≡ `\ce{H2SO4(aq)}` retrieve the same chunks. Unicode subscripts, charges (`\ce{SO4^2-}` ≡ `\ce{SO4^{2-}}`), hydrate dots, arrows, state suffixes, and parenthesized groups (`Ca(OH)2`) canonicalize into one token signature, and element symbols stay case-sensitive throughout (`Co` cobalt never matches `CO` carbon monoxide). Detection is deliberately conservative: only `\ce{}` inputs and full-match molecular tokens count as chemistry, so prose words are never indexed as formulas, non-chemistry math (`e^{i\pi}`) is rejected, and the query side additionally recognizes plain full-match segments — a query for `H2SO4` works without any TeX wrapper.
-
-Engineering units match across spellings in keyword search: the shared FTS tokenizer rewrites a middle dot between two recognized unit tokens, so `N·m` and `N m` produce identical index and query terms, symmetrically for indexed chunks and queries. The unit set is a frozen conservative list of SI base/derived units and common prefixed forms; non-unit pairs such as `a·b` are untouched, and single-token forms like `Nm` are intentionally not split.
-
-Retrieval quality is measurable: `npm run eval` runs a golden-query harness with per-domain files covering math notation, formulas, chemistry, units, code, prose, and LaTeX labels. The default `--fixture` mode builds an ephemeral knowledge base from committed fixtures and is the hard release gate — it is byte-deterministic, so two consecutive runs produce identical recall reports and any indexing or ranking change that flips a golden result fails visibly. `npm run eval -- --kb <name>` runs the same goldens read-only against a real knowledge base as an advisory live-corpus report, because a real corpus evolves while the fixture gate must not.
-
-Scientific PDF images are preserved instead of dropped: when the sidecar markdown references image files, each image is copied into a content-addressed store (`<knowledge-dir>/image-store/<sha256>.<ext>`), the chunk's link is rewritten to the stored path, and caption text becomes searchable. Caption-less images are OCR'd through an optional user-installed tesseract binary, appending the extracted text as a searchable `*OCR:*` paragraph; missing image files drop the reference instead of failing, and OCR failure never fails the index. `PI_KNOWLEDGE_OCR_ENGINE=auto|off` and the `PI_KNOWLEDGE_OCR_CMD` override mirror the PDF sidecar variables (see [docs/configuration.md](docs/configuration.md)). The store grows with indexed PDFs and is derived data; reset it with `rm -rf <knowledge-dir>/image-store` (the same posture as the PDF conversion cache).
-
-LaTeX cross-references become a label graph: `.tex` chunks record `\label` definitions and `\ref`-family targets (`\ref`, `\eqref`, `\cref`, `\Cref`, `\autoref`) as metadata, and references resolve through a scope key (`sha256` of relative path + label) that prefers same-file definitions and never guesses — a label colliding across files or missing entirely resolves as unresolved, not to a wrong chunk. A query naming a label retrieves the defining chunk, and chunks it references are boosted or injected with `match_reason: "dependency"` under the same filter and threshold-bypass rationale as formula evidence; KBs without label edges keep byte-identical results. Reference metadata re-hashes LaTeX-bearing chunks, so run `knowledge_update` once after upgrading to pick up label-graph metadata.
-
-In project-level dogfood, these changes improved a real codebase evaluation from early 3.x/5 quality to above 4.5/5 after rebuilds, with fixes for score compression, README repetition, garbage-query false positives, small-module discoverability, source-vs-test ranking, indexing stability, and auto-mode false positives. Existing KBs should be rebuilt or updated after upgrades that change indexing text.
+- **Local-first** — indexes under `~/.pi/knowledge/`; local ONNX embeddings (no API key); explicit offline mode.
+- **Hybrid retrieval** — lexical-anchored BM25 + dense vectors, normalized weighted score fusion, six modes (`fast` / `semantic` / `hybrid` / `deep` / `adaptive` / `auto`) plus intent aliases (`code`, `config`, `errors`, `docs`, `decision`).
+- **Code-aware indexing** — recursive AST chunking (tree-sitter) for TypeScript/JavaScript, Python, Go, Rust, Java, Bash, GNU C, C++, and QML; symbol index for methods, classes, config keys, and headings.
+- **Document-aware indexing** — Markdown headings/breadcrumbs, LaTeX sections, PDF (sidecar or text-layer), DOCX, URLs, plain text.
+- **Large-project stability** — persisted indexing progress, capped batches, streamed vector scans, stuck-job detection, incremental updates.
+- **Diagnosable** — per-result provenance (chunk id, match reason, score, freshness), ranking diagnostics, `knowledge_status`, `knowledge_doctor`.
 
 ## Quick Start
 
+Requirements: Node ≥ 22. Model weights (~150 MB) download once and are cached locally.
+
 ```bash
-# Install for Pi
-pi install npm:pi-knowledge
-
-# Install for OMP
-omp install npm:pi-knowledge
-
-# On minimal Ubuntu/Debian servers, install native build tools first because
-# OMP's Bun-based npm install compiles better-sqlite3 from source.
-sudo apt-get update && sudo apt-get install -y build-essential python3
-omp install npm:pi-knowledge
-
-# Or from source
-pi install ./pi-knowledge
-omp install ./pi-knowledge
-
-# Index a directory
-# (agent will call knowledge_add automatically, or you can ask it)
-> Index my project docs at ./docs as "Project Docs"
-
-# Search
-> Search my knowledge base for "authentication flow"
-
-# With PI_KNOWLEDGE_AUTO_INJECT=true, the agent also auto-searches relevant
-# knowledge before answering domain questions (opt-in, see configuration.md)
+# Install into Pi from a local clone
+git clone https://github.com/myusufalghifari10/pi-second-brain.git
+pi install /absolute/path/to/pi-second-brain
 ```
+
+Then just talk to your agent:
+
+```
+> Index my project at ~/work/my-app as "my-app"
+> Search my knowledge base for "authentication flow"
+> What does the formula index say about \int_0^\infty e^{-x^2}dx ?
+> Which table reports the 62.86 number, and for which method?
+```
+
+Optional integrations:
+
+```bash
+pip install marker-pdf        # or: pip install docling  — better PDF math extraction (auto-detected, fail-open)
+sudo pacman -S tesseract      # or apt install tesseract-ocr — OCR for caption-less PDF figures
+export PI_KNOWLEDGE_WATCH=true        # auto re-index watched directory KBs
+export PI_KNOWLEDGE_AUTO_INJECT=true  # agent auto-searches relevant knowledge before answering
+```
+
+OMP compatibility is inherited through the same packaged `extension.js` entry (`omp install /path`).
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `knowledge_plan` | Inspect an indexing source before writing a KB; reports scannable counts, suggested exclusions, and technical skips |
+| `knowledge_plan` | Inspect an indexing source before writing a KB: scannable counts, suggested exclusions, technical skips |
 | `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
-| `knowledge_search` | Fast, semantic, lexical-anchored hybrid, deep, or adaptive search across one or all knowledge bases; supports file-type and path filters |
-| `knowledge_symbol_search` | Lightweight exact or substring lookup for code symbols, route-like handlers, Markdown headings, config keys, and env vars; fall back to `knowledge_search` for methods or uncommon syntax |
-| `knowledge_remove` | Remove a knowledge base by name or ID after `confirm: true` |
-| `knowledge_update` | Incrementally re-index changed files in a source-backed file, directory, or URL knowledge base |
+| `knowledge_search` | Fast / semantic / hybrid / deep / adaptive search across one or all KBs, with filters, profiles, diagnostics, and `expand_neighbors` |
+| `knowledge_symbol_search` | Exact or substring lookup for code symbols, route-like handlers, headings, config keys, env vars |
+| `knowledge_update` | Incrementally re-index changed files in source-backed KBs |
+| `knowledge_status` | Engine status: staleness, orphans, coverage, indexing jobs |
+| `knowledge_doctor` | Health score + concrete repair actions (stale data, missing vectors, stuck jobs) |
+| `knowledge_export` / `knowledge_import` | Portable JSONL export / re-embed on import |
+| `knowledge_remove` / `knowledge_clear` | Remove one KB or everything (explicit `confirm: true` required) |
+| `knowledge_configure` | Persist runtime prerequisites (e.g. Windows `node.exe` path) |
 | `knowledge_show` | List all knowledge bases with stats |
-| `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
-| `knowledge_doctor` | Diagnose health score, skipped files, stuck jobs, stale data, and recommended fixes |
-| `knowledge_configure` | Persist runtime prerequisites such as a Windows `node.exe` path for the isolated local model worker |
-| `knowledge_clear` | Remove all knowledge bases after `confirm: true` |
-| `knowledge_export` | Export a KB to shareable JSONL file |
-| `knowledge_import` | Import a KB from JSONL (re-embeds content) |
 
-### Search Modes
+### Search-mode contract
 
-- `fast`: BM25 keyword search for exact symbols, commands, and identifiers.
-- `semantic`: vector search for conceptual matches.
-- `hybrid`: lexical-anchored BM25 + vector search with normalized weighted score fusion. It requires keyword evidence to avoid low-confidence semantic false positives.
-- `deep`: hybrid retrieval followed by cross-encoder reranking.
-- `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
-- `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
-- `code`, `config`, `errors`, `docs`, `decision`: intent aliases for agents. `code`, `config`, and `errors` bias toward exact lexical/symbol evidence; `docs` and `decision` keep the intended source type explicit.
+| Mode | Use when |
+|------|----------|
+| `fast` | Exact symbols, filenames, commands, error codes, config keys, numbers (`11.94`, `H2O`) |
+| `hybrid` *(default)* | Most project questions with lexical anchors — BM25-anchored + vector fusion |
+| `semantic` | Conceptual queries where wording differs; fallback when hybrid returns nothing |
+| `adaptive` | When the answer needs neighboring chunks / surrounding implementation context |
+| `deep` | High-stakes answers — hybrid + cross-encoder reranking |
+| `auto` | Lets the engine pick and retry alternate modes on weak results |
 
-Search profiles tune result count, snippet length, hybrid strictness, candidate breadth, adaptive context, and deep rerank breadth. `profile: "auto"` selects a runtime profile from query shape, mode, and KB source type; explicit tool parameters still win over profile defaults. Use `profile: "low_token"` for slow local models that need fewer, stricter, longer results in one call; use `precision` for identifiers/errors, `recall` for broad discovery, `long_context` for prose/specs, and `balanced` for compatibility.
-
-Mode selection contract:
-
-- Start with `hybrid` for most project questions that contain useful lexical anchors.
-- Use `fast` for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings.
-- Use `semantic` when the query is conceptual, exact terms may differ from indexed wording, or hybrid returns no lexical matches.
-- Use `adaptive` when the answer needs nearby code, neighboring documentation sections, AST-related sibling methods where indexed, or enough context to make a safe edit.
-- Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
-- If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.
-
-Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. In `adaptive` mode, code chunks with AST metadata can prefer same-parent/sibling chunks inside the same bounded file window; this is metadata-driven context expansion, not caller/callee analysis. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, source freshness, and adaptive `source_chunk_ids` where available.
-
-For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and AST-derived code structure such as symbol names, scopes, parent symbols, and signatures while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, classes, methods, or functions, and reduces duplicate-looking chunk hits.
-Symbol/config/heading metadata is also rebuilt during `knowledge_update`; code symbol metadata includes AST-backed methods for supported languages. Older KBs created before this feature may show a doctor action recommending update.
-
-## Embedding Configuration
-
-Local embeddings are the default and require no API key:
-
-```bash
-PI_KNOWLEDGE_EMBEDDING=local:multilingual-e5-small
-```
-
-OpenAI or OpenAI-compatible embedding APIs can be selected with `PI_KNOWLEDGE_EMBEDDING`:
-
-```bash
-export PI_KNOWLEDGE_EMBEDDING=openai:text-embedding-3-small
-export OPENAI_API_KEY=...
-```
-
-For self-hosted OpenAI-compatible servers, set either `PI_KNOWLEDGE_EMBEDDING_BASE_URL` or `OPENAI_BASE_URL` to the API root that contains `/embeddings`:
-
-```bash
-export PI_KNOWLEDGE_EMBEDDING=openai:Qwen3-Embedding-8B
-export PI_KNOWLEDGE_EMBEDDING_BASE_URL=http://127.0.0.1:8080/v1
-export OPENAI_API_KEY=local-placeholder
-```
-
-API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files.
-
-API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window; changing the cap changes embedding compatibility and requires `knowledge_update`.
-
-Stored KB metadata includes the embedding model, vector dimension, and a non-secret embedding signature. If the current query embedding is incompatible with a KB's stored vectors, or if an older KB has no signature metadata, `knowledge_search` skips vector retrieval for that KB and reports a warning; run `knowledge_update` after changing embedding providers or upgrading older KBs.
+Profiles (`low_token`, `precision`, `recall`, `long_context`) tune result count, snippet length, and rerank breadth; explicit parameters always win.
 
 ## Configuration
 
-Full configuration details are in [docs/configuration.md](docs/configuration.md).
+Full reference: [docs/configuration.md](docs/configuration.md). Common knobs:
 
-| Area | Environment variables |
-|------|-----------------------|
-| Storage path | `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR`, `OMP_CODING_AGENT_DIR`, `OMP_PROFILE` |
-| Model worker and cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
-| Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
-| Reranker provider | `PI_KNOWLEDGE_RERANKER`, `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE`, `PI_KNOWLEDGE_RERANKER_RAW_LOGITS`, `PI_KNOWLEDGE_RERANKER_API_ENDPOINT`, `PI_KNOWLEDGE_RERANKER_API_BASE_URL`, `PI_KNOWLEDGE_RERANKER_API_KEY`, `PI_KNOWLEDGE_RERANKER_API_FORMAT`, `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS`, `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS`, `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH`, `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD`, `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` |
-| Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
-| Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT`, `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER`, `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES`, `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS`, `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET`, `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES`, `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` |
-| Release fixtures | `PI_KNOWLEDGE_E2E_PDF`, `PI_KNOWLEDGE_E2E_DOCX` |
+| Area | Variables |
+|------|-----------|
+| Storage | `PI_KNOWLEDGE_DIR`, `PI_CODING_AGENT_DIR` |
+| Models | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH`, `PI_KNOWLEDGE_OFFLINE` |
+| Embedding | `PI_KNOWLEDGE_EMBEDDING=local:multilingual-e5-small` (default) or `openai:<model>` + `OPENAI_API_KEY` |
+| Reranker | `PI_KNOWLEDGE_RERANKER`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_API_*` |
+| Behavior | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE` |
+| PDF / OCR | `PI_KNOWLEDGE_PDF_ENGINE`, `PI_KNOWLEDGE_PDF_SIDECAR_TIMEOUT_MS`, `PI_KNOWLEDGE_OCR_ENGINE`, `PI_KNOWLEDGE_OCR_CMD` |
 
-For Hugging Face Text Embeddings Inference rerankers, use `PI_KNOWLEDGE_RERANKER=api:<model>`, `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei`, and `PI_KNOWLEDGE_RERANKER_API_ENDPOINT=http://127.0.0.1:8080/rerank`; TEI exposes OpenAI-compatible embeddings under `/v1`, but reranking uses `/rerank`.
-
-## Pi and OMP Support
-
-`pi-knowledge` supports Pi and [OMP](https://omp.sh/) extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
-
-Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
-
-OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, Windows-safe worker transport fallback, and idempotent shutdown. Local embeddings require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
-
-## Large Project Indexing
-
-Indexing is designed as a stable long-running operation, not a quick background trick. `knowledge_add`, `knowledge_update`, and `knowledge_import` scan directories incrementally, embed and store chunks in hard-capped batches, stream vector files to disk, and report progress with file/chunk counts, chunks/sec, skipped file counts, elapsed time, and file ETA where available. Directory indexing starts with a metadata-only planning scan so large repositories can show total scannable files and skipped counts before expensive embedding starts.
-
-Directory indexing separates technical skips from user-confirmable suggestions. `knowledge_plan` inspects a source without writing a KB, so agents can show scannable files, suggested exclusions, and technical skips before asking the user to confirm scope. Unsupported binary/non-text files, oversized files, unreadable files, inaccessible paths, and documents that cannot be extracted are skipped for stability. Text files that may be private or low-signal, such as `.env`, credential-named files, generated reports, lockfiles, vendor text, build output text, and runtime/cache text, are suggested exclusions by default rather than permanent blocks. Agents should explain the privacy and search-precision tradeoff, ask the user when the choice is ambiguous, and then use `include_suggested_text` or focused `include_paths` when the user confirms those text files belong in the KB. Ordinary project configuration files such as `settings.json` or `appsettings.json` remain indexable because they often describe real system behavior.
-
-Indexing progress is persisted in SQLite, not only printed as transient tool updates. `knowledge_status` shows the current or last indexing operation, phase, last progress message, last progress age, processed file/chunk counts, skipped count, and add/remove/unchanged counts. This makes long indexing runs distinguishable from stuck jobs even if the user checks status from a later prompt.
-
-Update and diagnostics paths are also streaming-oriented: changed chunks are embedded in batches, newly produced vectors are written to temporary vector files, deleted rows are removed in batches, and final vector rebuilds iterate SQLite rows instead of loading the whole KB. Search also avoids loading a full KB vector file or all chunk IDs into memory. Semantic and hybrid modes scan vectors from disk and retain only the top candidate vectors needed for ranking/diversity. `knowledge_status` reports stale files, orphaned chunks, coverage, skipped files, and indexing jobs that appear stuck after an interrupted or crashed Pi process. `knowledge_doctor` summarizes the same signals as a health score with concrete actions. KBs still marked `indexing` or `error` are visible in status but skipped by search, so interrupted work is not treated as a healthy searchable KB. A stuck `indexing` KB should be removed and rebuilt after confirming no active Pi process is still building it.
-
-## Architecture
-
-[DESIGN.md](DESIGN.md) is the historical technical design. For current behavior contracts, prefer this README, [AGENTS.md](AGENTS.md), [docs/configuration.md](docs/configuration.md), and the ADR/pitfall notes under `docs/`.
-
-## Data Storage
-
-All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/` under OMP unless overridden (never in your project directory):
+## Data & Safety
 
 ```
 ~/.pi/knowledge/
-├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
-├── vectors/          ← Embedding vectors per KB (binary)
-└── models/           ← Downloaded ONNX models (~118MB fp32, cached)
+├── knowledge.db      ← SQLite: metadata + chunks + FTS5 (+ formula/label/symbol tables)
+├── vectors/          ← binary embedding vectors per KB
+└── models/           ← cached ONNX models
 ```
 
-- **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`
-- **Reset**: delete the active knowledge directory to start fresh
-- **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
-- **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
-- **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
-- **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. Supported code files use the same AST analysis as chunking, so method symbols can be looked up even when their parent class remains one retrieval chunk. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
+- Read-only on your project — nothing in indexed directories is ever written.
+- Backup = copy the knowledge directory; reset = delete it; relocate = `PI_KNOWLEDGE_DIR`.
+- Schema migrations run automatically on upgrade; embedding-model changes are detected and vector retrieval skips incompatible KBs with a warning instead of returning garbage.
 
 ## Development
 
 ```bash
 npm install
-npm test          # Unit tests
-npm run test:e2e # Smoke integration tests; PDF/DOCX cases skip unless fixture env vars are set
-PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
-npm run bench     # Indexing/search benchmarks
-node --experimental-strip-types -e "import('./index.ts')" # Startup-light source import smoke
-```
-
-PDF/DOCX fixtures should be real local files outside the repository. Do not commit private fixture files, extracted fixture text, snapshots, or machine-specific fixture paths. A release-grade e2e pass requires both fixture env vars; a run with skipped PDF/DOCX cases is only a smoke pass.
-
-## Release
-
-Before publishing, update `package.json`, `package-lock.json`, and `CHANGELOG.md`, then run:
-
-```bash
-npm run check
 npm run typecheck
-npm test
+npm test                        # unit suite
 npm run build
-npm run test:e2e
-PI_KNOWLEDGE_E2E_PDF=/path/to/file.pdf PI_KNOWLEDGE_E2E_DOCX=/path/to/file.docx npm run test:e2e
-node -e "import('./extension.js')"
-node --experimental-strip-types -e "import('./index.ts')"
-npm pack --dry-run
-pi -e ./extension.js
-omp -e ./extension.js
-git push origin main
-gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /path/to/release-notes.md
-npm publish
+npm run eval -- --fixture       # deterministic golden gate (must be 48/48)
+npm run test:e2e                # smoke; PDF/DOCX cases need fixture env vars
 ```
 
-Report any skipped or unverified gate explicitly. Do not describe smoke e2e as complete release-grade coverage.
+The release gate is explicit: `check` → `typecheck` → unit tests → build → golden eval → e2e. Any skipped gate must be reported, never assumed.
+
+## Acknowledgments
+
+Built on [nczz/pi-knowledge](https://github.com/nczz/pi-knowledge) — thank you for the excellent foundation. All science-layer, hardening, and verification work in this fork is independent.
 
 ## License
 

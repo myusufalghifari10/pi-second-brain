@@ -5,3 +5,7 @@ dist/
 .pi/settings.json
 .pi/knowledge/models/
 .codebase-memory/
+.memory/
+review-*.md
+FIX-*-REPORT.md
+brief-*.md

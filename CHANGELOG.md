@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.0] - 2026-09-21
 
 ### Added
 - Added table-narrative coupling for PDF text-layer extraction (unpdf path): detected table blocks (3+ consecutive column-gap or pipe-delimited lines) carry their nearest preceding narrative sentence as a `Context:` line, so concept queries about a table ("Table 5 shows …") and number queries about its cells retrieve the same chunk. The transform is idempotent, stops at headings and neighboring tables, applies only to the PDF text-layer path (sidecar markdown keeps its own heading provenance), and oversized tables carry the context in their first chunk.
