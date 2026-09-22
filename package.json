@@ -104,7 +104,6 @@
 		"esbuild@0.27.7": true,
 		"onnxruntime-node@1.21.0": true,
 		"protobufjs@7.6.4": true,
-		"sharp@0.34.5": true,
 		"tree-sitter-go@0.21.2": true,
 		"tree-sitter-c@0.21.4": true,
 		"tree-sitter-bash@0.21.0": true,
@@ -114,7 +113,8 @@
 		"tree-sitter-qmljs@0.3.1": true,
 		"tree-sitter-rust@0.21.0": true,
 		"tree-sitter-cpp@0.23.2": true,
-		"tree-sitter-typescript@0.23.2": true
+		"tree-sitter-typescript@0.23.2": true,
+		"better-sqlite3": true
 	},
 	"homepage": "https://github.com/myusufalghifari10/pi-second-brain#readme",
 	"bugs": "https://github.com/myusufalghifari10/pi-second-brain/issues",

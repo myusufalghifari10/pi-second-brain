@@ -16,14 +16,14 @@
 // environment overrides respected (CLAUDE_CONFIG_DIR, CODEX_HOME) — never spawn the harness binary
 // just to detect it. Idempotent: re-running setup never duplicates entries.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const CLI_PATH = fileURLToPath(import.meta.url);
-const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const PACKAGE_ROOT = packageRoot();
 const NODE_BIN = process.execPath;
 const SERVER_NAME = "pi-second-brain";
 const READ_ONLY_TOOLS = [
@@ -37,6 +37,20 @@ const READ_ONLY_TOOLS = [
 
 const IS_WINDOWS = platform() === "win32";
 
+// Locate the package root from either layout: src/cli.ts (dev) sits one level down,
+// dist/src/cli.js (built) sits two levels down.
+function packageRoot(): string {
+	const here = fileURLToPath(new URL(".", import.meta.url));
+	for (const up of ["..", "../.."]) {
+		const root = resolve(here, up);
+		if (existsSync(join(root, "package.json"))) return root;
+	}
+	return resolve(here, "..");
+}
+// npx executions live in a temporary cache; entries registered from there must reference the
+// published package, not the ephemeral path.
+const RUNNING_VIA_NPX = /[\\/]_npx[\\/]/.test(CLI_PATH);
+
 // Detection homes — env overrides first, mirroring vercel-labs/skills so installs that moved their
 // harness home (CLAUDE_CONFIG_DIR, CODEX_HOME) are still detected.
 const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), ".claude");
@@ -44,6 +58,7 @@ const CODEX_HOME = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
 const XDG_CONFIG_HOME = join(homedir(), ".config");
 
 export function buildServerEntry(): { command: string; args: string[] } {
+	if (RUNNING_VIA_NPX) return { command: "npx", args: ["-y", "pi-second-brain@latest", "mcp"] };
 	return { command: NODE_BIN, args: [CLI_PATH, "mcp"] };
 }
 
@@ -170,12 +185,14 @@ function piTarget(): Target {
 		label: "Pi (native extension)",
 		detect: () => existsSync(join(homedir(), ".pi", "agent")),
 		configure: () => {
+			if (RUNNING_VIA_NPX) return "manual";
 			const install = runCapture("pi", ["install", PACKAGE_ROOT]);
 			return install.ok ? "configured" : "failed";
 		},
 		remove: () => "manual",
-		manualNote:
-			"Pi uses the native extension (no MCP). Remove by deleting the entry from ~/.pi/agent/settings.json `packages`.",
+		manualNote: RUNNING_VIA_NPX
+			? "Pi uses the native extension (no MCP). Install from a real checkout: git clone https://github.com/myusufalghifari10/pi-second-brain.git && pi install <cloned absolute path>."
+			: "Pi uses the native extension (no MCP). Remove by deleting the entry from ~/.pi/agent/settings.json `packages`.",
 	};
 }
 
@@ -308,18 +325,25 @@ function buildTargets(): Target[] {
 const FLAGS = ["pi", "claude", "codex", "cursor", "cline", "gemini", "opencode"] as const;
 type FlagId = (typeof FLAGS)[number];
 
-function parse(argv: string[]): { command: string; ids: FlagId[]; all: boolean } {
+function parse(argv: string[]): { command: string; ids: FlagId[]; all: boolean; version: boolean } {
 	const { positionals, values: rawValues } = parseArgs({
 		args: argv,
 		allowPositionals: true,
 		options: Object.fromEntries([
 			...FLAGS.map((flag) => [flag, { type: "boolean" as const }]),
 			["all", { type: "boolean" as const }],
+			["version", { type: "boolean" as const }],
+			["v", { type: "boolean" as const }],
 		]),
 	});
-	const values = rawValues as Partial<Record<FlagId | "all", boolean>>;
+	const values = rawValues as Partial<Record<FlagId | "all" | "version" | "v", boolean>>;
 	const ids = FLAGS.filter((flag) => values[flag] === true);
-	return { command: positionals[0] ?? "", ids, all: values.all === true };
+	return {
+		command: positionals[0] ?? "",
+		ids,
+		all: values.all === true,
+		version: values.version === true || values.v === true,
+	};
 }
 
 function printHelp(): void {
@@ -339,9 +363,9 @@ Pi uses the native extension — exactly like the maintainer's own setup:
 }
 
 async function main(): Promise<number> {
-	const { command, ids, all } = parse(process.argv.slice(2));
-	if (command === "--version" || command === "-v") {
-		const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+	const { command, ids, all, version } = parse(process.argv.slice(2));
+	if (version) {
+		const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8")) as {
 			version?: string;
 		};
 		console.log(manifest.version ?? "unknown");
@@ -405,7 +429,9 @@ async function main(): Promise<number> {
 	return failed > 0 ? 1 : 0;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+// Compare real paths: global npm bins reach this file through a symlink (argv[1] is the symlink).
+const invokedAs = process.argv[1] ? realpathSync(process.argv[1]) : "";
+if (invokedAs && invokedAs === realpathSync(fileURLToPath(import.meta.url))) {
 	main()
 		.then((code) => {
 			if (code !== 0) process.exitCode = code;

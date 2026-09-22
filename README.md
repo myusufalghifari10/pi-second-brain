@@ -103,52 +103,49 @@ Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result 
 
 ## Install
 
-Two paths by design: **on Pi it's a native extension + skill; everywhere else it's an MCP server +
-skill.** All surfaces share the same brain (`~/.pi/knowledge`), so switching harnesses never means
-re-indexing.
-
-### On Pi — native extension + skill (the maintainer's own setup, verbatim)
+Two scripts — pick your surface. Both auto-detect **Linux, macOS, or Windows** and install
+everything needed: dependencies, the one native binary fetch, the build, and registration into the
+coding agents they find. All surfaces share the same brain (`~/.pi/knowledge`).
 
 ```bash
 git clone https://github.com/myusufalghifari10/pi-second-brain.git
-pi install /absolute/path/to/pi-second-brain
+cd pi-second-brain
+
+# On Pi — native extension + skill (the maintainer's own setup):
+sh scripts/install-pi.sh
+
+# Everywhere else — MCP server + skill (Claude Code, Codex, Cursor, Cline, Gemini CLI, OpenCode):
+sh scripts/install.sh
 ```
 
-Pi loads the extension directly: the full 13 `knowledge_*` tools, TUI rendering, per-session
-lifecycle, file watcher, and opt-in context auto-injection (`PI_KNOWLEDGE_AUTO_INJECT=true`). The
-packaged search-docs skill ships with it — no MCP, no extra steps.
+On Windows run the same commands in **Git Bash** (ships with [Git for Windows](https://git-scm.com/download/win)),
+or use the PowerShell twin:
 
-### Everywhere else — MCP server + skill
-
-```bash
-npm install -g github:myusufalghifari10/pi-second-brain
-pi-second-brain setup --all     # or pick: --claude --codex --cursor --cline --gemini --opencode
-pi-second-brain list            # verify what was detected
-npx skills add myusufalghifari10/pi-second-brain   # usage doctrine in 75+ harnesses (optional)
+```powershell
+scripts\install.ps1
 ```
 
-`setup` writes each harness's native config — `claude mcp add` for Claude Code,
-`[mcp_servers.pi-second-brain]` in `~/.codex/config.toml`, `~/.cursor/mcp.json`, Cline's
-`cline_mcp_settings.json` (read-only tools auto-approved), Gemini CLI's `settings.json`, and
-OpenCode's `opencode.json`. Detection is config-directory based (it respects `CLAUDE_CONFIG_DIR` and
-`CODEX_HOME`), works on Linux, macOS, and Windows, and is idempotent — re-run any time to update;
-`pi-second-brain remove --all` undoes everything. Restart your harness afterwards.
-
-### Manual, per harness
+Requirements: Node.js ≥ 22 and git — the script checks both and prints the exact fix per OS if
+anything is missing. It installs dependencies with `--ignore-scripts` and then rebuilds only
+`better-sqlite3` (the single dependency that fetches a prebuilt binary), so third-party install
+scripts can never break your install — the failure mode that plagues Windows npm installs.
 
 <details>
-<summary>Claude Code</summary>
+<summary>Manual registration (if you skipped setup)</summary>
 
 ```bash
-claude mcp add --scope user pi-second-brain -- node /path/to/pi-second-brain/dist/src/cli.js mcp
+node dist/src/cli.js setup --all    # or: --claude --codex --cursor --cline --gemini --opencode
+node dist/src/cli.js list           # verify what was detected
+node dist/src/cli.js remove --all   # undo
 ```
 
-</details>
+Claude Code only:
 
-<details>
-<summary>Codex CLI</summary>
+```bash
+claude mcp add --scope user pi-second-brain -- node /absolute/path/to/pi-second-brain/dist/src/cli.js mcp
+```
 
-Append to `~/.codex/config.toml`:
+Codex only — append to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.pi-second-brain]
@@ -158,25 +155,33 @@ args = ["/path/to/pi-second-brain/dist/src/cli.js", "mcp"]
 
 </details>
 
-<details>
-<summary>Cursor / Gemini CLI / Cline / OpenCode</summary>
+## Connect your coding agent
 
-All four are a JSON entry pointing at the same command — or just run `pi-second-brain setup --all`,
-which writes the exact format each one expects.
+The install script already wired everything it found. Installed a new harness later? Re-run
+`node dist/src/cli.js setup --all` — it is idempotent and never duplicates entries.
 
-</details>
+| Agent | What got wired | How to verify |
+|---|---|---|
+| **Pi** | Native extension via `pi install` (no MCP) + packaged skill | Restart Pi, ask: `jalankan knowledge_status` |
+| **Claude Code** | `claude mcp add --scope user` | Restart, run `/mcp` — pi-second-brain shows ✔ |
+| **Codex** | `[mcp_servers.pi-second-brain]` in `~/.codex/config.toml` | Restart, ask: `call knowledge_status` |
+| **Cursor** | `~/.cursor/mcp.json` | Settings → MCP shows pi-second-brain |
+| **Cline** | `cline_mcp_settings.json` (read-only tools auto-approved) | MCP tab in Cline |
+| **Gemini CLI** | `~/.gemini/settings.json` | Restart, ask: `call knowledge_status` |
+| **OpenCode** | `opencode.json` | Restart, ask: `call knowledge_status` |
 
-> An npm registry package is planned; until then, install from GitHub as shown above.
+**Smoke test (any agent):** ask it to call `knowledge_status` — you should see the storage path and
+`Knowledge bases: 0`. Then `knowledge_add` a folder of papers or docs and start asking questions.
 
-### Or just paste this to your agent
-
-```text
-Install pi-second-brain for me.
-If I am running Pi: git clone https://github.com/myusufalghifari10/pi-second-brain.git,
-then run: pi install <the cloned absolute path>.
-Otherwise: npm install -g github:myusufalghifari10/pi-second-brain,
-then: pi-second-brain setup --all, then verify with pi-second-brain list.
-```
+> **Not on the list?** Any MCP-capable client works — point it at
+> `node /path/to/pi-second-brain/dist/src/cli.js mcp`. And if your agent can read a file, just paste
+> this:
+>
+> ```text
+> git clone https://github.com/myusufalghifari10/pi-second-brain.git && cd pi-second-brain && sh scripts/install.sh
+> ```
+> (On Pi, run `sh scripts/install-pi.sh` instead.) Then restart me and call `knowledge_status` to
+> verify.
 
 ## Usage
 
