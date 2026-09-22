@@ -103,30 +103,44 @@ Every KB keeps provenance: chunk ids, match reasons, file freshness, per-result 
 
 ## Install
 
-Two scripts — pick your surface. Both auto-detect **Linux, macOS, or Windows** and install
-everything needed: dependencies, the one native binary fetch, the build, and registration into the
-coding agents they find. All surfaces share the same brain (`~/.pi/knowledge`).
+Two scripts — pick your surface. Both auto-detect the OS and install everything needed:
+dependencies, the one native binary fetch, the build, and registration into the coding agents they
+find. All surfaces share the same brain (`~/.pi/knowledge`). Requirements: **Node.js ≥ 22** and
+**git** — the script checks both and prints the exact fix per OS if anything is missing.
+
+**Pick your script (same script on every OS):** `scripts/install-pi.sh` on **Pi** (native extension
++ skill) or `scripts/install.sh` anywhere else (MCP server + skill). Then run it for your OS:
+
+### Linux
 
 ```bash
 git clone https://github.com/myusufalghifari10/pi-second-brain.git
 cd pi-second-brain
-
-# On Pi — native extension + skill (the maintainer's own setup):
-sh scripts/install-pi.sh
-
-# Everywhere else — MCP server + skill (Claude Code, Codex, Cursor, Cline, Gemini CLI, OpenCode):
-sh scripts/install.sh
+sh scripts/install.sh        # on Pi instead: sh scripts/install-pi.sh
 ```
 
-On Windows run the same commands in **Git Bash** (ships with [Git for Windows](https://git-scm.com/download/win)),
-or use the PowerShell twin:
+### macOS
+
+```bash
+git clone https://github.com/myusufalghifari10/pi-second-brain.git
+cd pi-second-brain
+sh scripts/install.sh        # on Pi instead: sh scripts/install-pi.sh
+```
+
+### Windows
+
+PowerShell (or the equivalent in Git Bash):
 
 ```powershell
-scripts\install.ps1
+git clone https://github.com/myusufalghifari10/pi-second-brain.git
+cd pi-second-brain
+.\scripts\install.ps1        # Git Bash alternative: sh scripts/install.sh
 ```
 
-Requirements: Node.js ≥ 22 and git — the script checks both and prints the exact fix per OS if
-anything is missing. It installs dependencies with `--ignore-scripts` and then rebuilds only
+(Git Bash ships with [Git for Windows](https://git-scm.com/download/win) — and `git clone` needs
+git anyway.)
+
+The script installs dependencies with `--ignore-scripts` and then rebuilds only
 `better-sqlite3` (the single dependency that fetches a prebuilt binary), so third-party install
 scripts can never break your install — the failure mode that plagues Windows npm installs.
 
