@@ -11,6 +11,8 @@ One local index that can hold **anything** — codebases, documentation, scienti
 > retrieval layer and a much broader ingestion pipeline. The runtime namespace is kept for compatibility:
 > environment variables stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
 
+> **Pairs with [pi-observational-memory](https://github.com/myusufalghifari10/pi-observational-memory)** — the pi-native extension that turns long-running sessions into durable `.memory/` topic files, which this KB can index and answer from. Observational memory writes; pi-second-brain retrieves — two halves of one memory stack.
+
 ---
 
 ## Why
