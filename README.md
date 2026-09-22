@@ -134,7 +134,8 @@ PowerShell (or the equivalent in Git Bash):
 ```powershell
 git clone https://github.com/myusufalghifari10/pi-second-brain.git
 cd pi-second-brain
-.\scripts\install.ps1        # Git Bash alternative: sh scripts/install.sh
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+# Git Bash alternative: sh scripts/install.sh
 ```
 
 (Git Bash ships with [Git for Windows](https://git-scm.com/download/win) — and `git clone` needs

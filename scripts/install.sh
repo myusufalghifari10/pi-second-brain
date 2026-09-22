@@ -33,7 +33,7 @@ else
 fi
 if [ "$node_ok" -ne 1 ]; then
 	case "$OS" in
-		windows) printf '       Install: winget install OpenJS.NodeJS.LTS   (or https://nodejs.org)\n' ;;
+		windows) printf '       Install: winget install -e --id OpenJS.NodeJS.LTS   (or https://nodejs.org)\n' ;;
 		macos) printf '       Install: brew install node@22   (or https://nodejs.org)\n' ;;
 		*) printf '       Install: sudo apt install nodejs npm   (or https://nodejs.org)\n' ;;
 	esac

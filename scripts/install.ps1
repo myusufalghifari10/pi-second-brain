@@ -1,11 +1,21 @@
 # pi-second-brain installer (PowerShell) — MCP harnesses, native Windows shell.
 #
-#   irm https://raw.githubusercontent.com/myusufalghifari10/pi-second-brain/main/scripts/install.ps1 | iex
+#   git clone https://github.com/myusufalghifari10/pi-second-brain.git
+#   cd pi-second-brain
+#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 #
 # Same steps as scripts/install.sh (which Windows users can also run in Git Bash).
 $ErrorActionPreference = "Stop"
 
-if ($PSScriptRoot) { Set-Location (Join-Path $PSScriptRoot "..") }
+if (-not $PSScriptRoot) {
+	# `irm | iex` runs with no script root; without the repo we would npm-install in the wrong folder.
+	Write-Host "error: run this script from a cloned repo (it needs the source tree):" -ForegroundColor Red
+	Write-Host "       git clone https://github.com/myusufalghifari10/pi-second-brain.git" -ForegroundColor Red
+	Write-Host "       cd pi-second-brain" -ForegroundColor Red
+	Write-Host '       powershell -ExecutionPolicy Bypass -File scripts\install.ps1' -ForegroundColor Red
+	exit 1
+}
+Set-Location (Join-Path $PSScriptRoot "..")
 
 Write-Host ""
 Write-Host "  pi-second-brain installer (Windows/PowerShell)" -ForegroundColor Bold
@@ -20,7 +30,7 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
 	Write-Host "error: Node.js not found." -ForegroundColor Red
 }
 if (-not $nodeOk) {
-	Write-Host "       Install: winget install OpenJS.NodeJS.LTS   (or https://nodejs.org)" -ForegroundColor Red
+	Write-Host "       Install: winget install -e --id OpenJS.NodeJS.LTS   (or https://nodejs.org)" -ForegroundColor Red
 	exit 1
 }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
