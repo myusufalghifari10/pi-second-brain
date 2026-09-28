@@ -129,6 +129,11 @@ export interface ScanOptions {
 	includeSuggestedText?: boolean;
 	includePaths?: string[];
 	excludePaths?: string[];
+	// Layer 5: an extra .gitignore layered on top of the scanned dir's own. A class root holds
+	// one KB per child directory, but the ignore rules live in the ROOT's .gitignore — without
+	// this a subclass scan is blind to them and indexes what the single-KB scan excluded (the
+	// transient .runs/ IPC and the orchestrator-rendered INDEX.md). Absolute path to that file.
+	ignoreFrom?: string;
 }
 
 export interface ScannedFile {
@@ -273,17 +278,20 @@ function isBinaryFile(filePath: string): boolean {
 	}
 }
 
-function buildIgnoreMatcher(dirPath: string): ReturnType<typeof ignore> {
+function buildIgnoreMatcher(dirPath: string, ignoreFrom?: string): ReturnType<typeof ignore> {
 	const ig = ignore();
 	ig.add(DEFAULT_SUGGESTED_EXCLUDE);
 
-	const gitignorePath = join(dirPath, ".gitignore");
-	if (existsSync(gitignorePath)) {
+	// The dir's own .gitignore first, then the inherited one: a nearer file is more specific, and
+	// git's own semantics let a deeper .gitignore re-include what a parent excluded. Reading the
+	// child's rules before the root's preserves that ordering intent.
+	for (const gitignorePath of [join(dirPath, ".gitignore"), ...(ignoreFrom ? [ignoreFrom] : [])]) {
+		if (!existsSync(gitignorePath)) continue;
 		try {
 			ig.add(readFileSync(gitignorePath, "utf-8"));
 		} catch {
 			// .gitignore vanished between existsSync and read (git checkout/clean race): proceed
-			// with the defaults only instead of throwing inside an unguarded scan path.
+			// with what loaded so far instead of throwing inside an unguarded scan path.
 		}
 	}
 
@@ -313,7 +321,7 @@ export function* iterateScannableFiles(
 	skipped: ScanResult["skipped"] = createSkippedScanStats(),
 	options: ScanOptions = {},
 ): Generator<ScannableFile> {
-	const ig = buildIgnoreMatcher(dirPath);
+	const ig = buildIgnoreMatcher(dirPath, options.ignoreFrom);
 	const includePaths = normalizeScanPaths(options.includePaths);
 	const excludePaths = normalizeScanPaths(options.excludePaths);
 	const includeSuggestedText = options.includeSuggestedText === true;

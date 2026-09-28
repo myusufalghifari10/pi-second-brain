@@ -243,6 +243,8 @@ export interface AddOptions {
 	description?: string;
 	class?: string;
 	class_root?: string;
+	/** Layer 5: absolute path to an ancestor .gitignore whose rules also apply to this scan. */
+	ignore_from?: string;
 }
 
 type UpdateableKnowledgeBase = KnowledgeBase & { source_path: string };
@@ -413,6 +415,7 @@ function toScanOptions(options: AddOptions = {}): ScanOptions {
 		includeSuggestedText: options.include_suggested_text === true,
 		includePaths: options.include_paths,
 		excludePaths: options.exclude_paths,
+		ignoreFrom: options.ignore_from,
 	};
 }
 
@@ -421,6 +424,10 @@ function serializeAddOptions(options: AddOptions = {}): string | undefined {
 	if (options.include_suggested_text === true) normalized.include_suggested_text = true;
 	if (options.include_paths && options.include_paths.length > 0) normalized.include_paths = options.include_paths;
 	if (options.exclude_paths && options.exclude_paths.length > 0) normalized.exclude_paths = options.exclude_paths;
+	// ignore_from is scan configuration, so it belongs in source_options and must survive a
+	// knowledge_update round-trip — a subclass that ignored .runs/ only on its first scan would
+	// quietly start indexing it on the next one.
+	if (options.ignore_from) normalized.ignore_from = options.ignore_from;
 	return Object.keys(normalized).length > 0 ? JSON.stringify(normalized) : undefined;
 }
 
@@ -436,6 +443,7 @@ function parseAddOptions(raw: string | null): AddOptions {
 			exclude_paths: Array.isArray(parsed.exclude_paths)
 				? parsed.exclude_paths.filter((item) => typeof item === "string")
 				: undefined,
+			ignore_from: typeof parsed.ignore_from === "string" ? parsed.ignore_from : undefined,
 		};
 	} catch {
 		return {};
@@ -2795,6 +2803,11 @@ export class KnowledgeEngine {
 		const created: string[] = [];
 		const existing: string[] = [];
 		const failed: Array<{ child: string; error: string }> = [];
+		// Layer 5: the class root owns the ignore rules for its children. Passing the root's
+		// .gitignore down is what keeps a subclass scan equivalent to the single-KB scan it
+		// replaces — otherwise .runs/ and INDEX.md, which the root excludes, get indexed.
+		const rootIgnore = join(root, ".gitignore");
+		const ignoreFrom = existsSync(rootIgnore) ? rootIgnore : undefined;
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(root, { withFileTypes: true });
@@ -2819,6 +2832,7 @@ export class KnowledgeEngine {
 					description: KnowledgeEngine.subclassDescription(childPath),
 					class: className,
 					class_root: root,
+					ignore_from: ignoreFrom,
 				});
 				created.push(kb.name);
 			} catch (error) {
