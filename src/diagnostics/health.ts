@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import {
 	createSkippedScanStats,
 	iterateScannableFiles,
+	scanOptionsFromSourceOptions,
 	type ScanOptions,
 	type ScanResult,
 } from "../indexer/chunker.ts";
@@ -31,28 +32,6 @@ const DEFAULT_STALE_INDEXING_MS = 10 * 60 * 1000;
 function staleIndexingMs(): number {
 	const configured = Number(process.env.PI_KNOWLEDGE_STALE_INDEXING_MS);
 	return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_INDEXING_MS;
-}
-
-function scanOptionsFromSourceOptions(raw: string | null): ScanOptions {
-	if (!raw) return {};
-	try {
-		const parsed = JSON.parse(raw) as {
-			include_suggested_text?: unknown;
-			include_paths?: unknown;
-			exclude_paths?: unknown;
-		};
-		return {
-			includeSuggestedText: parsed.include_suggested_text === true,
-			includePaths: Array.isArray(parsed.include_paths)
-				? parsed.include_paths.filter((item) => typeof item === "string")
-				: undefined,
-			excludePaths: Array.isArray(parsed.exclude_paths)
-				? parsed.exclude_paths.filter((item) => typeof item === "string")
-				: undefined,
-		};
-	} catch {
-		return {};
-	}
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

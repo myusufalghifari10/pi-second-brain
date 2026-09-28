@@ -136,6 +136,40 @@ export interface ScanOptions {
 	ignoreFrom?: string;
 }
 
+/**
+ * The single conversion from a KB's persisted `source_options` JSON to ScanOptions.
+ *
+ * This lives here, next to ScanOptions, because it had already been duplicated in two other
+ * modules (diagnostics/health.ts and the extension) and the copies had already drifted: a new
+ * scan option was threaded through one of them, so a subclass KB's coverage diagnostic counted
+ * .runs/ files that the KB itself deliberately excludes and reported 7% coverage for a fully
+ * indexed knowledge base. One function, no copies, is the only version that stays correct.
+ */
+export function scanOptionsFromSourceOptions(raw: string | null | undefined): ScanOptions {
+	if (!raw) return {};
+	try {
+		const parsed = JSON.parse(raw) as {
+			include_suggested_text?: unknown;
+			include_paths?: unknown;
+			exclude_paths?: unknown;
+			ignore_from?: unknown;
+		};
+		const strings = (value: unknown): string[] | undefined =>
+			Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : undefined;
+		return {
+			includeSuggestedText: parsed.include_suggested_text === true,
+			includePaths: strings(parsed.include_paths),
+			excludePaths: strings(parsed.exclude_paths),
+			ignoreFrom: typeof parsed.ignore_from === "string" ? parsed.ignore_from : undefined,
+		};
+	} catch {
+		// source_options is written by serializeAddOptions and only ever contains the fields parsed
+		// above, so this is corruption or a hand-edited row. Degrade to defaults rather than make
+		// every scan of that KB throw.
+		return {};
+	}
+}
+
 export interface ScannedFile {
 	path: string; // absolute path
 	relPath: string; // relative to root

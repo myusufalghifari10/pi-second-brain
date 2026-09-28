@@ -122,6 +122,21 @@ describe("class hierarchy (layer 5)", () => {
 			expect(paths.some((p) => p.endsWith("INDEX.md"))).toBe(false);
 			expect(paths).toContain("JOURNEY.md");
 		});
+
+		it("reports 100% coverage, not 7%, because the diagnostic counts the same files the KB indexed", async () => {
+			// The bug this pins: scanOptionsFromSourceOptions existed as two independent copies, and
+			// ignore_from was threaded into only one. The diagnostics copy therefore counted .runs/
+			// files that the KB deliberately excludes, so every fully-indexed subclass KB reported
+			// 7% coverage and looked broken. A KB that indexes 1 of 1 files cannot be 7% covered.
+			writeFileSync(join(classRoot, ".gitignore"), "# pi-second-brain KB scope: not memory\n.runs/\nINDEX.md\n");
+			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md", runs: true });
+			await engine.reconcileClassRoot(classRoot, "om");
+
+			const diag = engine.diagnose().find((entry) => entry.kb_name === "om-01a0c0f2-a0a");
+
+			expect(diag?.indexed_files).toBe(diag?.total_source_files);
+			expect(diag?.coverage_percent).toBe(100);
+		});
 	});
 
 	describe("startup reconcile", () => {

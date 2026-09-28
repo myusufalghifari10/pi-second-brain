@@ -1,6 +1,7 @@
 type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
 type StorageRuntime = typeof import("./src/storage/sqlite.ts");
 type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
+type ChunkerRuntime = typeof import("./src/indexer/chunker.ts");
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
 type ToolUpdate = (result: ToolResult) => void;
@@ -78,6 +79,7 @@ type Runtime = {
 	engine: KnowledgeEngineInstance;
 	storage: StorageRuntime;
 	watcher: WatcherRuntime;
+	chunker: ChunkerRuntime;
 };
 
 const RUNTIME_EXTENSION = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
@@ -90,32 +92,6 @@ let initializePromise: Promise<Runtime> | undefined;
 let initialized = false;
 let disposePromise: Promise<void> | undefined;
 
-function scanOptionsFromSourceOptions(raw: string | null | undefined): {
-	includeSuggestedText?: boolean;
-	includePaths?: string[];
-	excludePaths?: string[];
-} {
-	if (!raw) return {};
-	try {
-		const parsed = JSON.parse(raw) as {
-			include_suggested_text?: unknown;
-			include_paths?: unknown;
-			exclude_paths?: unknown;
-		};
-		return {
-			includeSuggestedText: parsed.include_suggested_text === true,
-			includePaths: Array.isArray(parsed.include_paths)
-				? parsed.include_paths.filter((item): item is string => typeof item === "string")
-				: undefined,
-			excludePaths: Array.isArray(parsed.exclude_paths)
-				? parsed.exclude_paths.filter((item): item is string => typeof item === "string")
-				: undefined,
-		};
-	} catch {
-		return {};
-	}
-}
-
 function runtimeModule(modulePath: string): string {
 	return `${modulePath}${RUNTIME_EXTENSION}`;
 }
@@ -127,8 +103,9 @@ async function loadRuntime(): Promise<Runtime> {
 		import(runtimeModule("./src/engine")),
 		import(runtimeModule("./src/storage/sqlite")),
 		import(runtimeModule("./src/watcher/file-watcher")),
-	]).then(([engineModule, storage, watcher]) => {
-		runtime = { engine: new engineModule.KnowledgeEngine(), storage, watcher };
+		import(runtimeModule("./src/indexer/chunker")),
+	]).then(([engineModule, storage, watcher, chunker]) => {
+		runtime = { engine: new engineModule.KnowledgeEngine(), storage, watcher, chunker };
 		return runtime;
 	});
 	return runtimePromise;
@@ -192,7 +169,8 @@ async function disposeRuntime(): Promise<void> {
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
-		const { engine, watcher } = await ensureInitialized();
+		const loaded = await ensureInitialized();
+		const { engine, watcher } = loaded;
 		if (WATCH_ENABLED) {
 			// Layer 5: a subclass KB is watched by its class root's single watcher, so it must not
 			// install one of its own — otherwise a class with N conversations pays N pollers and N
@@ -204,7 +182,7 @@ export default function (pi: ExtensionAPI) {
 						kb.id,
 						kb.source_path,
 						(kbId) => engine.update(kbId),
-						scanOptionsFromSourceOptions(kb.source_options),
+						loaded.chunker.scanOptionsFromSourceOptions(kb.source_options),
 					);
 				}
 			}
