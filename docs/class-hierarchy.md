@@ -66,16 +66,37 @@ read as a sort/compare in `knowledge_status`, never in a hot query.
 
 | Operation | Behaviour |
 |---|---|
-| `knowledge_add(class_root=…, class=…)` | Reconciles the root: one KB per existing child directory, then indexes it. Idempotent. |
+| `knowledge_class_sync(root=…, class=…)` | Reconciles the root: one KB per existing child directory, then indexes it. Idempotent. |
 | Reconcile on a new child | The class watcher detects an unknown child directory and reconciles just that child. |
-| Reconcile on process start | Re-runs for every registered class root, catching conversations created while Pi was closed. |
+| Reconcile on process start | `startClassWatchers` fires a reconcile per registered root, catching conversations created while Pi was closed. Fire-and-forget with an `onLog` warn hook; a failure is reported, never swallowed. |
+| Reconcile on a later start | Refreshes each child's derived `description` and its `.gitignore` inheritance. No re-embed, and it does not touch `updated_at`, so a description change is never reported as a reindex. |
 | `knowledge_search(class=…)` | Restricts `availableKBs` before retrieval. Pushdown, not post-filter. |
 | `knowledge_search(kb_ids=[…])` | Same, for an explicit subset. |
+| `knowledge_search(kb_id=…)` | Existing single-KB scoping. The subclass boundary. |
 
 KB naming is `om-<first 12 chars of the directory name>`. Deterministic and collision-free
 for UUID session ids, and idempotent by construction: reconciling twice produces the same
-name and the second pass is a no-op. `description` carries the child's `INDEX.md` first line
-so the UUID-named KB is readable in `knowledge_status`.
+name and the second pass is a no-op.
+
+`description` is derived from the child's `JOURNEY.md` or `STATE.md` — **not** from
+`INDEX.md`. `INDEX.md` is orchestrator-rendered and its first line is the same
+`# Memory index` for every conversation, so describing subclasses from it would make all 37
+of them indistinguishable. A line must clear a 60-character floor so a bare date heading
+(`## 2026-09-22`) is skipped; if neither file yields prose, the child hand-named topic files
+are used instead (`topics: browser redesign`).
+
+### Ignore inheritance
+
+`buildIgnoreMatcher` reads only `join(dirPath, ".gitignore")`, so a scan rooted at a child
+directory is blind to the rules in the class root's `.gitignore`. That is not cosmetic: for
+the memory class the root file excludes `.runs/` (transient worker IPC), `INDEX.md` and
+itself — and without inheritance **843 of those files were indexed across 37 subclasses**.
+
+`ScanOptions.ignoreFrom` layers an ancestor `.gitignore` on top of the dir's own, the nearer
+file first so a child can still re-include what a parent excluded.
+`reconcileClassRoot` passes the root's `.gitignore` down, and `AddOptions.ignore_from` is
+serialized into `source_options` so a `knowledge_update` round-trip keeps honouring it —
+without that, a subclass would quietly start indexing `.runs/` on its second scan.
 
 ## Watching: one watcher per class root
 
@@ -89,6 +110,12 @@ It is not needed. A class root gets exactly **one** watcher and one poller, and:
   the owning subclass KB;
 - the same walk sees a new child directory and triggers a reconcile for it;
 - the poller cost is one directory walk per tick regardless of how many subclasses exist.
+
+The startup reconcile is not redundant with the watcher, and the distinction is the whole
+reason it exists. The watcher's first snapshot is taken at `session_start`, so a conversation
+directory created while Pi was closed is **already in that baseline** — no diff will ever
+report it, and without an explicit reconcile its content is permanently unindexed. `fs.watch`
+does not help either: it only fires for changes that happen *after* it is installed.
 
 `engine.ts` skips per-KB watcher startup for any KB that has a `class_root`, so a child KB
 never installs a watcher of its own. Total watcher count is 1 per class root, independent of
