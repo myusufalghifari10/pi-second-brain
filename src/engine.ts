@@ -2846,6 +2846,19 @@ export class KnowledgeEngine {
 			const name = KnowledgeEngine.subclassName(className, entry.name);
 			const known = this.db ? getKBByName(this.db, name) : undefined;
 			if (known) {
+				// A name match is only "already indexed" if it is THIS directory. The KB name is
+				// derived from the first 12 characters of the directory name, so two siblings whose
+				// names share that prefix both resolve to the same KB. Treating the second as
+				// already-indexed parked it in `existing` with no error, and its whole corpus was
+				// never indexed — silent data loss, discoverable only weeks later when a query for
+				// that topic returns nothing. Report it instead.
+				if (known.source_path !== childPath) {
+					failed.push({
+						child: entry.name,
+						error: `Name collision: "${entry.name}" and "${known.source_path}" both map to knowledge base "${name}" (class + first 12 characters of the directory name). Nothing was indexed for this directory. Rename one of them so their first 12 characters differ.`,
+					});
+					continue;
+				}
 				// Refresh the derived description even when the child is already indexed: it is
 				// cheap (a few file reads, no embed) and it is the only human-readable label a
 				// UUID-named subclass KB ever gets.

@@ -201,6 +201,56 @@ describe("class hierarchy (layer 5)", () => {
 		});
 	});
 
+	describe("name collisions", () => {
+		it("refuses to index a second child whose first 12 characters collide", async () => {
+			// The bug: getKBByName(className + first 12 chars) matching is treated as "this child is
+			// already indexed", so a sibling sharing the prefix was parked in `existing` and never
+			// indexed. Silent, unreported, and it loses a whole topic's material.
+			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
+			await engine.reconcileClassRoot(classRoot, "om");
+
+			// Both directory names start with "01a0c0f2-a0a", so both map to KB name om-01a0c0f2-a0a.
+			const second = writeChild("01a0c0f2-a0aZZ-76fa-83d6-c92fe9cb2249", {
+				journey: JOURNEY,
+				topic: "browser-redesign.md",
+			});
+
+			const result = await engine.reconcileClassRoot(classRoot, "om");
+
+			expect(result.existing).toEqual(["om-01a0c0f2-a0a"]);
+			// A collision is data loss if it is silent, so it must be surfaced, not swallowed.
+			expect(result.failed).toHaveLength(1);
+			expect(result.failed[0].child).toBe("01a0c0f2-a0aZZ-76fa-83d6-c92fe9cb2249");
+			expect(result.failed[0].error).toMatch(/01a0c0f2-a0a/);
+			// The colliding directory must not be indexed under the sibling's KB either.
+			const chunks = (
+				engine["db"]!
+					.prepare("SELECT count(*) AS n FROM chunks c JOIN knowledge_bases kb ON kb.id = c.kb_id WHERE kb.name = ?")
+					.all("om-01a0c0f2-a0a") as Array<{ n: number }>
+			)[0].n;
+			expect(chunks).toBeGreaterThan(0);
+			expect(
+				(
+					engine["db"]!
+						.prepare("SELECT count(*) AS n FROM chunks c JOIN knowledge_bases kb ON kb.id = c.kb_id WHERE kb.source_path = ?")
+						.all(second) as Array<{ n: number }>
+				)[0].n,
+			).toBe(0);
+		});
+
+		it("does not flag a collision when the same directory is reconciled twice", async () => {
+			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
+
+			await engine.reconcileClassRoot(classRoot, "om");
+			const second = await engine.reconcileClassRoot(classRoot, "om");
+
+			// Idempotency is the property the whole layer depends on: re-running must be a no-op.
+			expect(second.created).toEqual([]);
+			expect(second.existing).toEqual(["om-01a0c0f2-a0a"]);
+			expect(second.failed).toEqual([]);
+		});
+	});
+
 	describe("search scoping", () => {
 		it("scopes kb_id to one subclass and class to the whole hierarchy", async () => {
 			// The query term lives in both children's JOURNEY.md AND in a non-class KB, so an
