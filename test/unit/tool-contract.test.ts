@@ -175,6 +175,7 @@ describe("public tool contracts", () => {
 			knowledge_add: "write",
 			knowledge_clear: "write",
 			knowledge_configure: "write",
+			knowledge_class_sync: "write",
 			knowledge_doctor: "read",
 			knowledge_export: "write",
 			knowledge_import: "write",

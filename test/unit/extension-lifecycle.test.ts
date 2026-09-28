@@ -39,6 +39,12 @@ vi.mock("../../src/engine.ts", () => ({
 			return [];
 		}
 
+		// Layer 5: session_start calls this after the per-KB watcher loop. No KBs exist in this
+		// fixture, so it returns no roots and installs no class watcher.
+		startClassWatchers(): [] {
+			return [];
+		}
+
 		async dispose(): Promise<void> {
 			lifecycle.disposeCount += 1;
 		}
@@ -56,6 +62,7 @@ vi.mock("../../src/watcher/file-watcher.ts", () => ({
 		return 0;
 	},
 	startWatcher(): void {},
+	startClassWatcher(): void {},
 	stopAllWatchers(): void {
 		lifecycle.stopWatcherCount += 1;
 	},

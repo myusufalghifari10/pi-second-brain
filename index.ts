@@ -194,7 +194,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
 		const { engine, watcher } = await ensureInitialized();
 		if (WATCH_ENABLED) {
+			// Layer 5: a subclass KB is watched by its class root's single watcher, so it must not
+			// install one of its own — otherwise a class with N conversations pays N pollers and N
+			// recursive watches that each re-walk the same tree.
 			for (const kb of engine.list()) {
+				if (kb.class_root) continue;
 				if (kb.source_path && kb.source_type === "directory") {
 					watcher.startWatcher(
 						kb.id,
@@ -203,6 +207,11 @@ export default function (pi: ExtensionAPI) {
 						scanOptionsFromSourceOptions(kb.source_options),
 					);
 				}
+			}
+			// Scan options for class children are the default set, which is what the pre-class
+			// om-memory KB used: .gitignore is honoured, so transient .runs/ stays excluded.
+			for (const root of engine.startClassWatchers(watcher, {})) {
+				console.log(`[pi-second-brain] watching class root ${root}`);
 			}
 		}
 	});
@@ -455,6 +464,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Search knowledge bases (hybrid is lexical-anchored BM25 + semantic fusion)",
 		promptGuidelines: [
 			"Use knowledge_search to find relevant context before answering domain questions",
+			"Layer 5: kb_id scopes to ONE subclass (one conversation), class scopes to every KB of that class (all conversations), kb_ids to an explicit set. All three are pushdown, so a subclass's own content is retrievable even when it is a small minority of the class; path_pattern is NOT equivalent — it filters after retrieval and can return nothing for content that exists",
 			"Default to mode 'hybrid' for most project questions with useful lexical anchors; it fuses BM25 and semantic vectors but still requires keyword evidence",
 			"Use mode 'fast' for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings",
 			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording or hybrid returns no lexical matches",
@@ -495,6 +505,18 @@ export default function (pi: ExtensionAPI) {
 			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default comes from search profile/env)" })),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
+			kb_ids: Type.Optional(
+				Type.Array(
+					Type.String({
+						description: "A KB ID or exact name (layer 5: scope to a few subclasses at once)",
+					}),
+				),
+			),
+			class: Type.Optional(
+				Type.String({
+					description: "Limit search to every KB of one class (layer 5: e.g. 'om' for all Pi Observational Memory conversations). Pushdown, not a post-filter.",
+				}),
+			),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset (capped at 10000)" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
 			path_pattern: Type.Optional(
@@ -521,6 +543,8 @@ export default function (pi: ExtensionAPI) {
 				profile,
 				limit,
 				kb_id,
+				kb_ids,
+				class: kbClass,
 				offset,
 				file_type,
 				path_pattern,
@@ -544,6 +568,8 @@ export default function (pi: ExtensionAPI) {
 				profile?: "auto" | "balanced" | "low_token" | "precision" | "recall" | "long_context" | "code" | "docs";
 				limit?: number;
 				kb_id?: string;
+				kb_ids?: string[];
+				class?: string;
 				offset?: number;
 				file_type?: string;
 				path_pattern?: string;
@@ -554,7 +580,7 @@ export default function (pi: ExtensionAPI) {
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
 			const response = await engine.search(
 				query,
-				{ mode, profile, limit, kb_id, offset, filters, diversity, expand_neighbors },
+				{ mode, profile, limit, kb_id, kb_ids, class: kbClass, offset, filters, diversity, expand_neighbors },
 				_signal,
 			);
 			if (response.results.length === 0) {
@@ -733,9 +759,20 @@ export default function (pi: ExtensionAPI) {
 			for (const kb of kbs) {
 				const age = Math.round((Date.now() - kb.updated_at) / 60000);
 				const diag = diagnostics.find((d) => d.kb_id === kb.id);
+				// Layer 5: a subclass KB is named om-<uuid12>, which is unreadable on its own, so
+				// the class and the child's own description are what make it identifiable — and
+				// last_searched_at is what makes "unused" measurable rather than guessed.
+				const classTag = kb.class ? ` — class ${kb.class}` : "";
 				lines.push(
-					`  "${kb.name}" — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`,
+					`  "${kb.name}"${classTag} — ${kb.status} — ${kb.chunk_count} chunks, ${kb.file_count} files — updated ${age}m ago`,
 				);
+				if (kb.description) lines.push(`    about: ${kb.description}`);
+				if (kb.last_searched_at) {
+					const searchedAgo = Math.round((Date.now() - kb.last_searched_at) / 60000);
+					lines.push(`    last searched: ${searchedAgo}m ago`);
+				} else if (kb.class) {
+					lines.push(`    last searched: never`);
+				}
 				if (kb.source_path) lines.push(`    source: ${kb.source_path}`);
 				if (diag) {
 					if (diag.job) {
@@ -828,6 +865,41 @@ export default function (pi: ExtensionAPI) {
 			const kbs = engine.list(_signal);
 			if (kbs.length === 0) return { content: [{ type: "text", text: "No knowledge bases." }] };
 			const lines = kbs.map((kb) => `• ${kb.name} — ${kb.chunk_count} chunks, ${kb.file_count} files (${kb.status})`);
+			return { content: [{ type: "text", text: lines.join("\n") }] };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_class_sync",
+		label: "Knowledge Class Sync",
+		description:
+			"Reconcile a class root: ensure one knowledge base per direct child directory (layer 5). Idempotent — safe to re-run; it creates only the missing subclasses. Use for Pi Observational Memory, where each conversation directory is a subclass.",
+		approval: "write",
+		promptGuidelines: [
+			"The class root itself is never indexed; only its direct child directories become subclasses",
+			"Subclass KB names are deterministic (class + first 12 chars of the directory name), so re-running is a no-op rather than a duplicate",
+			"A child that fails to index is reported but does not abort the rest of the reconcile",
+			"Search one conversation with knowledge_search(kb_id=<subclass name>); search every conversation of a class with knowledge_search(class=<class>)",
+		],
+		parameters: Type.Object({
+			root: Type.String({ description: "Absolute path of the class root directory" }),
+			class: Type.String({ description: "Class name for the created subclasses, e.g. 'om'" }),
+		}),
+		async execute(_id, params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const { root, class: className } = params as { root: string; class: string };
+			const { engine } = await ensureInitialized();
+			const result = await engine.reconcileClassRoot(root, className, undefined, _signal);
+			const lines = [
+				`Class "${className}" root ${root}`,
+				`  created: ${result.created.length}`,
+				`  existing: ${result.existing.length}`,
+				`  failed: ${result.failed.length}`,
+			];
+			if (result.created.length > 0) lines.push(`  new: ${result.created.join(", ")}`);
+			for (const failure of result.failed) {
+				lines.push(`  ⚠️ ${failure.child}: ${failure.error}`);
+			}
 			return { content: [{ type: "text", text: lines.join("\n") }] };
 		},
 	});

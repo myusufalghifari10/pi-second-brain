@@ -61,12 +61,12 @@ describe("formula storage schema (F3)", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("creates schema version 8 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
+	it("creates schema version 9 with formulas table, FTS table, triggers, indexes, and kb flag column", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-storage-formulas-"));
 		tempDirs.push(dir);
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 9 });
 
 			const tables = tableNames(db, "table");
 			expect(tables.has("formulas")).toBe(true);
@@ -125,7 +125,7 @@ describe("formula storage schema (F3)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 9 });
 			expect(tableNames(db, "table").has("formulas")).toBe(true);
 			expect(tableNames(db, "table").has("formulas_fts")).toBe(true);
 			expect(tableNames(db, "table").has("label_edges")).toBe(true);
@@ -170,7 +170,7 @@ describe("formula storage schema (F3)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 9 });
 			const indexes = tableNames(db, "index");
 			expect(indexes.has("idx_formulas_chunk")).toBe(true);
 			expect(indexes.has("idx_chunks_kb_file")).toBe(true);

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
@@ -89,6 +90,7 @@ import {
 	listKBs,
 	markFormulaIndexBuilt,
 	markLabelGraphBuilt,
+	touchKBsSearched,
 	openDatabase,
 	type ResolvedLabelEdgeRow,
 	replaceFormulasForChunk,
@@ -121,6 +123,11 @@ export interface SearchOptions {
 	limit?: number;
 	offset?: number;
 	kb_id?: string;
+	// Layer 5 (docs/class-hierarchy.md): restrict to an explicit set of KBs (ids or exact names).
+	// Like kb_id this is pushdown — it narrows the KB set before retrieval, not after.
+	kb_ids?: string[];
+	// Layer 5: restrict to the KBs of one class. Pushdown, unlike the post-retrieval path_pattern.
+	class?: string;
 	filters?: { file_type?: string; path_pattern?: string };
 	diversity?: "off" | "balanced" | "strong";
 	// Attach up to N adjacent chunks (same file, start_line order) of the top hit as read-only context.
@@ -228,6 +235,14 @@ export interface AddOptions {
 	include_suggested_text?: boolean;
 	include_paths?: string[];
 	exclude_paths?: string[];
+	// Layer 5 (docs/class-hierarchy.md). `class` names the class this KB belongs to and
+	// `class_root` is the directory whose direct children are the subclasses. When class_root is
+	// set the KB is a subclass: it is reconciled idempotently by name and is watched by the root's
+	// single watcher instead of getting one of its own. Not serialized into source_options — they
+	// are identity, not scan configuration, and must survive an update round-trip.
+	description?: string;
+	class?: string;
+	class_root?: string;
 }
 
 type UpdateableKnowledgeBase = KnowledgeBase & { source_path: string };
@@ -1408,7 +1423,6 @@ export class KnowledgeEngine {
 			this.addUnlocked(source, name, onProgress, signal, options),
 		);
 	}
-
 	private async addUnlocked(
 		source: string,
 		name: string,
@@ -1438,9 +1452,12 @@ export class KnowledgeEngine {
 		try {
 			const kb = createKB(db, {
 				name,
+				description: options.description,
 				source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
 				source_type: sourceType,
 				source_options: serializeAddOptions(options),
+				class: options.class,
+				class_root: options.class_root,
 				embedding_model: embeddingConfigLabel(embeddingConfig),
 			});
 			updateKBStatus(db, kb.id, "indexing");
@@ -2211,8 +2228,37 @@ export class KnowledgeEngine {
 
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
 		if (kb_id && !selectedKB) throw new Error(`Knowledge base not found: ${kb_id}`);
-		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
+		let availableKBs: KnowledgeBase[] = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
+		if (options.kb_ids && options.kb_ids.length > 0) {
+			// Resolve every requested id/name up front so a typo fails loudly instead of silently
+			// narrowing the search to whichever subset happened to exist.
+			const missing: string[] = [];
+			const wanted = new Set<string>();
+			for (const ref of options.kb_ids) {
+				const resolved = getKB(db, ref) ?? getKBByName(db, ref);
+				if (resolved) wanted.add(resolved.id);
+				else missing.push(ref);
+			}
+			if (missing.length > 0) {
+				throw new Error(`Knowledge base not found: ${missing.join(", ")}`);
+			}
+			availableKBs = availableKBs.filter((kb) => wanted.has(kb.id));
+		}
+		if (options.class) {
+			availableKBs = availableKBs.filter((kb) => kb.class === options.class);
+			if (availableKBs.length === 0) {
+				throw new Error(`No knowledge bases belong to class "${options.class}"`);
+			}
+		}
 		const kbs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
+		// Layer 5: mark the KBs this search actually reads, so "unused" is measurable and pruning
+		// by last-use is a fact rather than a guess. Only KBs with content are recorded: an empty
+		// KB is skipped below and recording it would overstate its usage. Deliberately does not
+		// touch updated_at — that column means "last indexed".
+		touchKBsSearched(
+			db,
+			kbs.filter((kb) => kb.chunk_count > 0).map((kb) => kb.id),
+		);
 		const kbById = new Map(kbs.map((kb) => [kb.id, kb]));
 		for (const kb of availableKBs) {
 			if (kb.status !== "ready" && kb.status !== "stale") {
@@ -2703,6 +2749,148 @@ export class KnowledgeEngine {
 		if (!this.db) return [];
 		throwIfAborted(signal);
 		return listKBs(this.db);
+	}
+
+	// --- Layer 5: class hierarchy (docs/class-hierarchy.md) ---
+
+	/**
+	 * Deterministic subclass KB name for a child directory of a class root. Idempotent by
+	 * construction: reconciling the same child twice yields the same name, and the second pass
+	 * sees the KB already exists and leaves it alone. Truncating the directory name to 12
+	 * characters keeps UUID session ids collision-free in practice while staying readable.
+	 */
+	static subclassName(className: string, childDirName: string): string {
+		return `${className}-${childDirName.slice(0, 12)}`;
+	}
+
+	/** Human-readable one-liner for a subclass KB, taken from the child's INDEX.md heading. */
+	private static subclassDescription(childPath: string): string | undefined {
+		for (const candidate of ["INDEX.md", "JOURNEY.md", "STATE.md"]) {
+			try {
+				const raw = readFileSync(join(childPath, candidate), "utf-8");
+				for (const line of raw.split("\n")) {
+					const text = line.replace(/^#+\s*/, "").trim();
+					if (text) return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+				}
+			} catch {
+				/* child has no such file — try the next one */
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Ensure one KB exists for every direct child directory of `root`. Idempotent: children that
+	 * already have a KB are left alone, so this is safe to call on every session start and from
+	 * the watcher whenever a new conversation directory appears.
+	 */
+	async reconcileClassRoot(
+		root: string,
+		className: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+		options: Omit<AddOptions, "class" | "class_root" | "description"> = {},
+	): Promise<{ created: string[]; existing: string[]; failed: Array<{ child: string; error: string }> }> {
+		throwIfAborted(signal);
+		const created: string[] = [];
+		const existing: string[] = [];
+		const failed: Array<{ child: string; error: string }> = [];
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(root, { withFileTypes: true });
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") throw new Error(`Class root not found: ${root}`);
+			if (code === "ENOTDIR") throw new Error(`Class root is not a directory: ${root}`);
+			throw new Error(`Cannot read class root ${root}: ${(error as Error).message}`);
+		}
+		for (const entry of entries) {
+			if (signal?.aborted) throw new Error("Cancelled");
+			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+			const childPath = join(root, entry.name);
+			const name = KnowledgeEngine.subclassName(className, entry.name);
+			if (this.db && getKBByName(this.db, name)) {
+				existing.push(name);
+				continue;
+			}
+			try {
+				const { kb } = await this.add(childPath, name, onProgress, signal, {
+					...options,
+					description: KnowledgeEngine.subclassDescription(childPath),
+					class: className,
+					class_root: root,
+				});
+				created.push(kb.name);
+			} catch (error) {
+				// One unindexable child must not abort the rest of the reconcile — a class with 36
+				// conversations should still get 35 of them indexed, with the failure reported.
+				if (signal?.aborted) throw new Error("Cancelled");
+				failed.push({ child: entry.name, error: (error as Error).message });
+			}
+		}
+		return { created, existing, failed };
+	}
+
+	/**
+	 * Install one watcher per class root. Subclass KBs are deliberately excluded from the
+	 * per-KB watcher path, so a class with N conversations still costs exactly one watcher.
+	 * Must be called with the engine's own watcher module injected by the extension entrypoint.
+	 */
+	startClassWatchers(
+		watchModule: {
+			startClassWatcher: (
+				root: string,
+				knownChildren: Iterable<string>,
+				handlers: {
+					onNewChild: (childName: string, childPath: string) => unknown;
+					onChildChanged: (childPath: string) => unknown;
+					onChildRemoved: (childName: string, childPath: string) => unknown;
+				},
+			) => void;
+		},
+		options: AddOptions = {},
+	): string[] {
+		if (!this.db) return [];
+		const roots = new Map<string, { className: string; children: string[] }>();
+		for (const kb of listKBs(this.db)) {
+			if (!kb.class_root || !kb.class || !kb.source_path) continue;
+			const entry = roots.get(kb.class_root) ?? { className: kb.class, children: [] };
+			entry.children.push(kb.source_path);
+			roots.set(kb.class_root, entry);
+		}
+		const started: string[] = [];
+		for (const [root, { className, children }] of roots) {
+			// childPath -> kbId, read on every change event. Rebuilt from a reconcile rather than
+			// rescanning the KB table, so a change burst costs a map hit, not a full listKBs().
+			const byPath = new Map<string, string>();
+			for (const kb of listKBs(this.db)) {
+				if (kb.class_root === root && kb.source_path) byPath.set(kb.source_path, kb.id);
+			}
+			watchModule.startClassWatcher(root, children, {
+				onNewChild: async (_childName: string, childPath: string) => {
+					const result = await this.reconcileClassRoot(root, className, undefined, undefined, options);
+					for (const name of result.created) {
+						const kb = this.db ? getKBByName(this.db, name) : undefined;
+						if (kb?.source_path) byPath.set(kb.source_path, kb.id);
+					}
+				},
+				// Route the change to the subclass that owns it. engine.update() rejects when that
+				// KB is already indexing; the per-KB watcher retry path owns that case, and an
+				// unknown path means the child has not been reconciled yet, which onNewChild covers.
+				onChildChanged: (childPath: string) => {
+					const kbId = byPath.get(childPath);
+					return kbId ? this.update(kbId) : undefined;
+				},
+				onChildRemoved: (_childName: string, childPath: string) => {
+					// The KB is intentionally NOT removed: a conversation directory can vanish
+					// transiently (mount hiccup, rename) and dropping its index would make its
+					// content unreachable for no gain. A later reconcile re-adopts the directory.
+					byPath.delete(childPath);
+				},
+			});
+			started.push(root);
+		}
+		return started;
 	}
 
 	clear(): void {

@@ -13,6 +13,12 @@ export interface KnowledgeBase {
 	source_path: string | null;
 	source_type: "file" | "directory" | "text" | "url";
 	source_options: string | null;
+	/** Layer 5: class name this KB belongs to, or null for a standalone KB. */
+	class: string | null;
+	/** Layer 5: absolute class root that owns this KB, or null. */
+	class_root: string | null;
+	/** Layer 5: epoch ms of the last search that included this KB; null = never searched. */
+	last_searched_at: number | null;
 	created_at: number;
 	updated_at: number;
 	chunk_count: number;
@@ -79,7 +85,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const ITERATION_BATCH_SIZE = 500;
 
 const FORMULAS_SCHEMA_SQL = `
@@ -155,6 +161,9 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   source_path TEXT,
   source_type TEXT NOT NULL DEFAULT 'directory',
   source_options TEXT,
+  class TEXT,
+  class_root TEXT,
+  last_searched_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   chunk_count INTEGER NOT NULL DEFAULT 0,
@@ -166,6 +175,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   label_graph_built INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'ready'
 );
+
+CREATE INDEX IF NOT EXISTS idx_kb_class ON knowledge_bases(class);
 
 CREATE TABLE IF NOT EXISTS chunks (
   id TEXT PRIMARY KEY,
@@ -509,6 +520,23 @@ CREATE INDEX IF NOT EXISTS idx_chunks_kb_file ON chunks(kb_id, file_path);
 `);
 			continue;
 		}
+		if (v === 9) {
+			// Layer 5 (docs/class-hierarchy.md): a class root holds one KB per child directory, so
+			// search can scope to a subset of KBs by name or id before retrieval. Purely additive —
+			// every existing row keeps a NULL class and behaves exactly as it did before.
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			for (const [name, decl] of [
+				["class", "TEXT"],
+				["class_root", "TEXT"],
+				["last_searched_at", "INTEGER"],
+			] as const) {
+				if (!columns.some((column) => column.name === name)) {
+					db.exec(`ALTER TABLE knowledge_bases ADD COLUMN ${name} ${decl}`);
+				}
+			}
+			db.exec("CREATE INDEX IF NOT EXISTS idx_kb_class ON knowledge_bases(class);");
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -523,6 +551,8 @@ export function createKB(
 		source_path?: string;
 		source_type: KnowledgeBase["source_type"];
 		source_options?: string;
+		class?: string;
+		class_root?: string;
 		embedding_model?: string;
 		embedding_signature?: string;
 		embedding_dimension?: number;
@@ -533,9 +563,9 @@ export function createKB(
 	db.prepare(
 		`INSERT INTO knowledge_bases (
        id, name, description, source_path, source_type, source_options, created_at, updated_at,
-       embedding_model, embedding_signature, embedding_dimension
+       embedding_model, embedding_signature, embedding_dimension, class, class_root
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		id,
 		opts.name,
@@ -548,6 +578,8 @@ export function createKB(
 		opts.embedding_model ?? "multilingual-e5-small",
 		opts.embedding_signature ?? null,
 		opts.embedding_dimension ?? null,
+		opts.class ?? null,
+		opts.class_root ?? null,
 	);
 	const kb = getKB(db, id);
 	if (!kb) throw new Error(`Failed to create knowledge base: ${id}`);
@@ -581,6 +613,19 @@ export function deleteKB(db: Database.Database, id: string): void {
 
 export function updateKBStatus(db: Database.Database, id: string, status: KnowledgeBase["status"]): void {
 	db.prepare("UPDATE knowledge_bases SET status = ?, updated_at = ? WHERE id = ?").run(status, Date.now(), id);
+}
+
+// Layer 5 (docs/class-hierarchy.md): records that a search actually read this KB, so
+// "unused" is a measured fact rather than a guess. Deliberately does NOT touch updated_at —
+// that column means "last indexed" and search must not masquerade as an index operation.
+// One statement per KB per search, batched by the caller.
+export function touchKBsSearched(db: Database.Database, ids: string[], at: number = Date.now()): void {
+	if (ids.length === 0) return;
+	const stmt = db.prepare("UPDATE knowledge_bases SET last_searched_at = ? WHERE id = ?");
+	const apply = db.transaction((kbIds: string[]) => {
+		for (const id of kbIds) stmt.run(at, id);
+	});
+	apply(ids);
 }
 
 export function updateKBCounts(db: Database.Database, id: string, chunkCount: number, fileCount: number): void {

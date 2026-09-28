@@ -178,12 +178,12 @@ describe("label graph schema v8 (F7)", () => {
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("creates schema version 8 with label_edges table, indexes, and label_graph_built flag column", () => {
+	it("creates schema version 9 with label_edges table, indexes, and label_graph_built flag column", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pk-label-graph-"));
 		tempDirs.push(dir);
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 9 });
 
 			const objects = (kind: string) =>
 				new Set(
@@ -248,7 +248,7 @@ describe("label graph schema v8 (F7)", () => {
 
 		const db = openDatabase(dir);
 		try {
-			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 8 });
+			expect(db.prepare("SELECT version FROM schema_version").get()).toEqual({ version: 9 });
 			expect(
 				(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).some(
 					(row) => row.name === "label_edges",

@@ -3,7 +3,7 @@
 //
 // The Pi extension (index.ts) is the native front door; this file is the second front door that
 // lets every MCP-capable harness (Claude Code, Codex, Cline, Cursor, Gemini CLI, OpenCode, ...)
-// drive the SAME engine, the SAME storage (~/.pi/knowledge), and the SAME 13 knowledge_* tools.
+// drive the SAME engine, the SAME storage (~/.pi/knowledge), and the SAME knowledge_* tools.
 // Tool definitions AND the runtime lifecycle are collected from the extension factory itself via
 // a shim host, so both surfaces can never drift: one definition, one runtime owner, two
 // transports.
