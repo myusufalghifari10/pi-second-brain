@@ -904,11 +904,16 @@ async function extractPdfSourceFileContent(
 	}
 	throwIfAborted(signal);
 	// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
-	const { extractText } = await import("unpdf");
+	const { extractText, getDocumentProxy } = await import("unpdf");
 	throwIfAborted(signal);
 	const buf = readFileSync(filePath);
 	throwIfAborted(signal);
-	const { text } = await extractText(new Uint8Array(buf));
+	// verbosity 0 = pdf.js VerbosityLevel.ERRORS. Papers with malformed CFF/Type2 fonts make the
+	// charstring interpreter warn once per glyph ("Not enough parameters for hstem; actual: 0,
+	// expected: 2") — thousands of lines that flood the host output and get the add aborted.
+	// ERRORS-only keeps real parse failures visible and drops the per-glyph noise.
+	const doc = await getDocumentProxy(new Uint8Array(buf), { verbosity: 0 });
+	const { text } = await extractText(doc);
 	throwIfAborted(signal);
 	// Table-narrative coupling (PDF-only): unpdf flattens tables to bare lines, so table chunks
 	// would never carry the sentence that introduces them. Markdown (sidecar) keeps headings and
