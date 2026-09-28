@@ -99,6 +99,7 @@ import {
 	searchSymbols,
 	startIndexingJob,
 	updateIndexingJob,
+	updateKBDescription,
 	updateKBCounts,
 	updateKBEmbeddingMetadata,
 	updateKBStatus,
@@ -2771,18 +2772,39 @@ export class KnowledgeEngine {
 		return `${className}-${childDirName.slice(0, 12)}`;
 	}
 
-	/** Human-readable one-liner for a subclass KB, taken from the child's INDEX.md heading. */
+	/**
+	 * Human-readable one-liner for a subclass KB.
+	 *
+	 * INDEX.md is deliberately NOT used: it is orchestrator-rendered boilerplate whose first line
+	 * is the same "# Memory index" for every conversation, which would make all 37 subclasses
+	 * indistinguishable. JOURNEY.md carries the actual first paragraph of what the conversation
+	 * was about. A line must clear a length floor so a bare date heading such as
+	 * "## 2026-09-22" or "# Journey" is skipped rather than becoming the description.
+	 */
 	private static subclassDescription(childPath: string): string | undefined {
-		for (const candidate of ["INDEX.md", "JOURNEY.md", "STATE.md"]) {
+		for (const candidate of ["JOURNEY.md", "STATE.md"]) {
 			try {
 				const raw = readFileSync(join(childPath, candidate), "utf-8");
 				for (const line of raw.split("\n")) {
 					const text = line.replace(/^#+\s*/, "").trim();
-					if (text) return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+					if (text.length < 60) continue;
+					return text.length > 120 ? `${text.slice(0, 117).replace(/\s+\S*$/, "")}...` : text;
 				}
 			} catch {
-				/* child has no such file — try the next one */
+				/* child has no such file, or it is empty — try the next candidate */
 			}
+		}
+		// Last resort: the child's topic filenames, which are hand-named and therefore meaningful
+		// ("browser-redesign.md" says more than a UUID ever will).
+		try {
+			const topics = readdirSync(childPath, { withFileTypes: true })
+				.map((entry) => entry.name)
+				.filter((name) => name.endsWith(".md") && !/^(INDEX|JOURNEY|STATE)\.md$/.test(name))
+				.slice(0, 3)
+				.map((name) => name.replace(/\.md$/, "").replace(/[-_]+/g, " "));
+			if (topics.length > 0) return `topics: ${topics.join(", ")}`;
+		} catch {
+			/* unreadable child */
 		}
 		return undefined;
 	}
@@ -2822,7 +2844,12 @@ export class KnowledgeEngine {
 			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
 			const childPath = join(root, entry.name);
 			const name = KnowledgeEngine.subclassName(className, entry.name);
-			if (this.db && getKBByName(this.db, name)) {
+			const known = this.db ? getKBByName(this.db, name) : undefined;
+			if (known) {
+				// Refresh the derived description even when the child is already indexed: it is
+				// cheap (a few file reads, no embed) and it is the only human-readable label a
+				// UUID-named subclass KB ever gets.
+				updateKBDescription(this.db as Database.Database, known.id, KnowledgeEngine.subclassDescription(childPath));
 				existing.push(name);
 				continue;
 			}
@@ -2863,6 +2890,7 @@ export class KnowledgeEngine {
 			) => void;
 		},
 		options: AddOptions = {},
+		onLog?: (level: "info" | "warn", message: string) => void,
 	): string[] {
 		if (!this.db) return [];
 		const roots = new Map<string, { className: string; children: string[] }>();
@@ -2874,6 +2902,28 @@ export class KnowledgeEngine {
 		}
 		const started: string[] = [];
 		for (const [root, { className, children }] of roots) {
+			// Layer 5: reconcile on process start. The class watcher's first snapshot is taken
+			// here, so a conversation directory created while Pi was closed is already in that
+			// baseline and will NEVER be reported as onNewChild — without this pass its content
+			// would be permanently unindexed. Fire-and-forget with its own guard: startup must not
+			// block on an embed, and a failure here is retried by the next explicit
+			// knowledge_class_sync rather than crashing session_start. The log hook is a separate
+			// parameter rather than a field on AddOptions on purpose: AddOptions is serialized into
+			// source_options, and a callback must never be written there.
+			const startup = this.reconcileClassRoot(root, className, undefined, undefined, options)
+				.then((result) => {
+					for (const name of result.created) {
+						const kb = this.db ? getKBByName(this.db, name) : undefined;
+						if (kb?.source_path) byPath.set(kb.source_path, kb.id);
+					}
+				})
+				.catch((error: unknown) => {
+					onLog?.(
+						"warn",
+						`class ${className}: startup reconcile of ${root} failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				});
+			void startup;
 			// childPath -> kbId, read on every change event. Rebuilt from a reconcile rather than
 			// rescanning the KB table, so a change burst costs a map hit, not a full listKBs().
 			const byPath = new Map<string, string>();

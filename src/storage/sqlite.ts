@@ -628,6 +628,15 @@ export function touchKBsSearched(db: Database.Database, ids: string[], at: numbe
 	apply(ids);
 }
 
+// Layer 5 (docs/class-hierarchy.md): a subclass KB is named after a UUID, so its description is
+// the only thing that makes it recognisable in knowledge_status. It is refreshed on every
+// reconcile because it is derived from the child's own files, which change underneath us — and
+// deliberately does NOT touch updated_at, so a description change is not reported as a reindex.
+export function updateKBDescription(db: Database.Database, id: string, description: string | undefined): void {
+	if (description === undefined) return;
+	db.prepare("UPDATE knowledge_bases SET description = ? WHERE id = ?").run(description, id);
+}
+
 export function updateKBCounts(db: Database.Database, id: string, chunkCount: number, fileCount: number): void {
 	db.prepare("UPDATE knowledge_bases SET chunk_count = ?, file_count = ?, updated_at = ? WHERE id = ?").run(
 		chunkCount,

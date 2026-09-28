@@ -210,7 +210,12 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Scan options for class children are the default set, which is what the pre-class
 			// om-memory KB used: .gitignore is honoured, so transient .runs/ stays excluded.
-			for (const root of engine.startClassWatchers(watcher, {})) {
+			// startClassWatchers also fires a reconcile per root, so a conversation created while
+			// Pi was closed is indexed on this startup rather than waiting for a file event that
+			// the watcher's baseline snapshot has already made impossible to see.
+			for (const root of engine.startClassWatchers(watcher, {}, (level, message) => {
+				console.log(`[pi-second-brain] ${level}: ${message}`);
+			})) {
 				console.log(`[pi-second-brain] watching class root ${root}`);
 			}
 		}
