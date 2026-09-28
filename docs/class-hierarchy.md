@@ -78,6 +78,34 @@ KB naming is `om-<first 12 chars of the directory name>`. Deterministic and coll
 for UUID session ids, and idempotent by construction: reconciling twice produces the same
 name and the second pass is a no-op.
 
+### Name collisions are a hard error, not a no-op
+
+That guarantee holds for UUID directory names only. Two **hand-named** siblings sharing their
+first 12 characters resolve to the same KB name, so `reconcileClassRoot` discriminates on
+`source_path`, not on the name:
+
+- same `source_path` → idempotent re-reconcile; refresh the description, report in `existing`
+- different `source_path` → **collision**; report in `failed` with a message naming both
+  directories, and index nothing for it
+
+The second case used to report `existing` too, which parked the colliding directory without
+indexing it and through no channel: silent data loss, visible only when a query for that topic
+returned nothing much later. A collision is cheap to fix (rename one directory) and expensive
+to miss, so it uses the existing per-child failure channel and does not abort the rest of the
+class.
+
+### Nested directories are deliberately not subclasses
+
+`reconcileClassRoot` iterates depth 1 only (`entry.isDirectory()`), while the scanner recurses
+into subdirectories. So `systems/compilers/` is **indexed into its parent's KB** but is not a KB
+of its own.
+
+This is the escape hatch that makes a coarse class cheap. Topical depth lives in the
+filesystem and is free; only topics that have demonstrated they need isolation spend one of the
+class's names on a KB. It also keeps the 12-character budget small enough that collisions are
+rare by construction — and, for a hand-named class, a two-digit family prefix
+(`01-networking-protocols`) makes uniqueness structural rather than a convention to remember.
+
 `description` is derived from the child's `JOURNEY.md` or `STATE.md` — **not** from
 `INDEX.md`. `INDEX.md` is orchestrator-rendered and its first line is the same
 `# Memory index` for every conversation, so describing subclasses from it would make all 37
