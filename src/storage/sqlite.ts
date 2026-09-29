@@ -598,6 +598,15 @@ export function listKBs(db: Database.Database): KnowledgeBase[] {
 	return db.prepare("SELECT * FROM knowledge_bases ORDER BY updated_at DESC").all() as KnowledgeBase[];
 }
 
+/** A KB by its exact source path. The class watcher needs this as a cache-miss fallback: a child
+ *  that is discovered and dispatched in the same tick has not been written into the in-memory
+ *  child->kbId map yet, because building that map is only possible after the reconcile awaits. */
+export function getKBBySourcePath(db: Database.Database, sourcePath: string): KnowledgeBase | undefined {
+	return db.prepare("SELECT * FROM knowledge_bases WHERE source_path = ?").get(sourcePath) as
+		| KnowledgeBase
+		| undefined;
+}
+
 // One transaction: a crash between the six statements must not leave a half-deleted KB
 // (e.g. formulas gone while chunks and their built-index flags survive).
 export function deleteKB(db: Database.Database, id: string): void {

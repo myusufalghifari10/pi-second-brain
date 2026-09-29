@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
 import { listKBs } from "../../src/storage/sqlite.ts";
+import * as watchModule from "../../src/watcher/file-watcher.ts";
 
 const JOURNEY =
 	"## 2026-09-22\n\nYusuf asked for a deep read of the pi-observational-memory repo and a written " +
@@ -42,6 +43,30 @@ async function waitFor(predicate: () => boolean, timeoutMs = 30_000): Promise<vo
 const noopWatchModule = {
 	startClassWatcher: () => {},
 };
+
+/** The chunk count currently recorded for a KB, for polling on a real watcher. */
+function chunksOf(kbName: string): number {
+	return listKBs(engine["db"]!).find((entry) => entry.name === kbName)?.chunk_count ?? -1;
+}
+
+/** A child holding exactly the named .md files, so the file count per test is explicit. */
+function childWith(dirName: string, files: string[]): string {
+	const childPath = join(classRoot, dirName);
+	mkdirSync(childPath, { recursive: true });
+	for (const file of files) writeFileSync(join(childPath, file), `# ${file}\n\nadvanced notes on ${file}.\n`);
+	return childPath;
+}
+
+/** The distinct source files currently indexed for a KB. */
+function filesOf(kbName: string): Set<string> {
+	const db = engine["db"]!;
+	const id = listKBs(db).find((entry) => entry.name === kbName)?.id;
+	if (!id) return new Set();
+	const rows = db.prepare("SELECT DISTINCT file_path FROM chunks WHERE kb_id = ?").all(id) as {
+		file_path: string;
+	}[];
+	return new Set(rows.map((row) => row.file_path));
+}
 
 describe("class hierarchy (layer 5)", () => {
 	beforeEach(async () => {
@@ -199,6 +224,48 @@ describe("class hierarchy (layer 5)", () => {
 			expect(warnings[0]).toContain("startup reconcile");
 			expect(warnings[0]).toContain("Class root is not a directory");
 		});
+	});
+
+	describe("class watcher routing", () => {
+		// These two tests drive the REAL watcher, because both defects live in the routing between
+		// the snapshot diff and the child KB — a mocked watcher reproduces neither.
+		beforeEach(async () => {
+			childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md"]);
+			await engine.reconcileClassRoot(classRoot, "om");
+			engine.startClassWatchers(watchModule, {});
+		});
+
+		// A single watcher transition costs one poll plus one debounce (~4s) plus the reindex, so
+		// these drive the real clock and need far more than the default 15s timeout.
+		it("re-indexes a live subclass after one of its files is deleted", async () => {
+			childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md", "b.md"]);
+			await waitFor(() => chunksOf("om-01a0c0f2-a0a") === 2);
+
+			// The child stays alive, so onChildRemoved must NOT fire, but the deletion is still an
+			// ordinary edit and the orphan chunk has to be retracted.
+			unlinkSync(join(classRoot, "01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", "b.md"));
+
+			await waitFor(() => chunksOf("om-01a0c0f2-a0a") === 1);
+			expect(chunksOf("om-01a0c0f2-a0a")).toBe(1);
+		}, 120_000);
+
+		it("keeps routing a subclass that went empty and was refilled", async () => {
+			const childPath = childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md"]);
+			await waitFor(() => filesOf("om-01a0c0f2-a0a").has("a.md"));
+
+			// A child that empties is indistinguishable from one whose directory vanished, so
+			// onChildRemoved fires and drops the child->kbId mapping. The index is deliberately NOT
+			// wiped: a zero-file scan against a populated KB is treated as a broken mount, not an
+			// intentional deletion. So the proof that routing came back is the REFILLED file being
+			// indexed — a chunk count would stay 1 either way and assert nothing.
+			unlinkSync(join(childPath, "a.md"));
+			// One poll plus one debounce plus the attempted update, before the refill is written.
+			await new Promise((resolve) => setTimeout(resolve, 8000));
+
+			writeFileSync(join(childPath, "c.md"), "# c.md\n\nrefilled with different material.\n");
+			await waitFor(() => filesOf("om-01a0c0f2-a0a").has("c.md"), 60_000);
+			expect(filesOf("om-01a0c0f2-a0a").has("c.md")).toBe(true);
+		}, 180_000);
 	});
 
 	describe("name collisions", () => {

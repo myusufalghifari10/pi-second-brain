@@ -77,6 +77,7 @@ import {
 	getFileCount,
 	getKB,
 	getKBByName,
+	getKBBySourcePath,
 	getSymbolCount,
 	insertChunks,
 	insertSymbols,
@@ -2945,17 +2946,27 @@ export class KnowledgeEngine {
 			}
 			watchModule.startClassWatcher(root, children, {
 				onNewChild: async (_childName: string, childPath: string) => {
-					const result = await this.reconcileClassRoot(root, className, undefined, undefined, options);
-					for (const name of result.created) {
-						const kb = this.db ? getKBByName(this.db, name) : undefined;
-						if (kb?.source_path) byPath.set(kb.source_path, kb.id);
+					const db = this.db;
+					if (!db) return;
+					await this.reconcileClassRoot(root, className, undefined, undefined, options);
+					// Rebuild the WHOLE child->kbId map for this root rather than trusting
+					// result.created. The reconcile is idempotent, so a child that went empty and was
+					// refilled comes back as an EXISTING kb with created=[]; trusting created there
+					// left byPath without the entry and deafened that subclass for the rest of the
+					// process. A stale entry is harmless: dispatch needs a changed file path, and a
+					// vanished directory cannot produce one. Cost is one listKBs() per new child.
+					for (const kb of listKBs(db)) {
+						if (kb.class_root === root && kb.source_path) byPath.set(kb.source_path, kb.id);
 					}
 				},
 				// Route the change to the subclass that owns it. engine.update() rejects when that
-				// KB is already indexing; the per-KB watcher retry path owns that case, and an
-				// unknown path means the child has not been reconciled yet, which onNewChild covers.
+				// KB is already indexing; the per-KB watcher retry path owns that case.
+				// The DB lookup is the cache-miss fallback, not a hot path: a child discovered and
+				// dispatched in the same tick cannot be in byPath yet, and without the fallback its
+				// first write — and for a single-file subclass, its only write — is dropped.
 				onChildChanged: (childPath: string) => {
-					const kbId = byPath.get(childPath);
+					const db = this.db;
+					const kbId = byPath.get(childPath) ?? (db ? getKBBySourcePath(db, childPath)?.id : undefined);
 					return kbId ? this.update(kbId) : undefined;
 				},
 				onChildRemoved: (_childName: string, childPath: string) => {

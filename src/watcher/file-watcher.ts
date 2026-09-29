@@ -272,7 +272,10 @@ function checkClassRoot(root: string, handlers: ClassWatchHandlers): void {
 		if (segment) presentChildren.add(segment);
 	}
 	const touchedChildren = new Set<string>();
-	for (const path of [...added, ...changed]) {
+	// `removed` belongs here too: deleting a file inside a live child is an ordinary edit that must
+	// retract the orphaned chunks. Without it the snapshot diff knows about the deletion but no
+	// child KB is ever updated, so the chunks stay searchable forever.
+	for (const path of [...added, ...changed, ...removed]) {
 		const segment = childSegmentOf(root, path);
 		if (segment) touchedChildren.add(segment);
 	}
@@ -288,6 +291,14 @@ function checkClassRoot(root: string, handlers: ClassWatchHandlers): void {
 			void Promise.resolve(handlers.onNewChild(segment, join(root, segment))).catch(() => {});
 		}
 	}
+	// Order matters, and it is discover -> update -> forget. Updating before forgetting is what
+	// lets a child whose LAST file was deleted retract its chunks: a child that empties is
+	// indistinguishable from a vanished one, so onChildRemoved fires for it too, and if it ran
+	// first the routing would already be gone by the time onChildChanged was reached.
+	for (const segment of touchedChildren) {
+		if (!state.children.has(segment)) continue;
+		void Promise.resolve(handlers.onChildChanged(join(root, segment))).catch(() => {});
+	}
 	for (const path of removed) {
 		const segment = childSegmentOf(root, path);
 		// Only a disappearance of the whole child counts; a single deleted file inside a live
@@ -296,10 +307,6 @@ function checkClassRoot(root: string, handlers: ClassWatchHandlers): void {
 			state.children.delete(segment);
 			void Promise.resolve(handlers.onChildRemoved(segment, join(root, segment))).catch(() => {});
 		}
-	}
-	for (const segment of touchedChildren) {
-		if (!state.children.has(segment)) continue;
-		void Promise.resolve(handlers.onChildChanged(join(root, segment))).catch(() => {});
 	}
 	// Stored unconditionally after dispatch: each dispatch is a content-hash reconciled update
 	// that re-reads the current state, and the per-KB pendingRetry machinery owns the
