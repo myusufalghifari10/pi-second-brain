@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KnowledgeEngine } from "../../src/engine.ts";
-import { buildChunkEmbeddingText } from "../../src/indexer/chunker.ts";
+import { KnowledgeEngine, URL_MAX_BYTES } from "../../src/engine.ts";
+import { buildChunkEmbeddingText, MAX_SOURCE_FILE_SIZE } from "../../src/indexer/chunker.ts";
 import { SidecarError } from "../../src/indexer/pdf-sidecar.ts";
 import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
@@ -616,13 +616,17 @@ describe("KnowledgeEngine", () => {
 		it("flags and refuses an oversized single-file document", async () => {
 			// Cap applies to PDF/DOCX too (the r14 fix covered text only): directory scans already
 			// skip oversized files, so single-file ingestion must not become the OOM loophole.
+			// Sized from the cap itself, not a literal: a hardcoded 10 MB fixture silently became a
+			// VALID input when the cap was raised, and the test then measured a real ingest instead
+			// of the refusal it exists to pin.
+			const capMB = Math.round(MAX_SOURCE_FILE_SIZE / (1024 * 1024));
 			const bigPdf = join(TEST_DIR, "big.pdf");
-			writeFileSync(bigPdf, Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(10 * 1024 * 1024 + 1)]));
+			writeFileSync(bigPdf, Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(MAX_SOURCE_FILE_SIZE + 1)]));
 
 			const plan = engine.plan(bigPdf);
-			expect(plan.summary).toContain("exceeds the 10 MB single-file cap");
+			expect(plan.summary).toContain(`exceeds the ${capMB} MB single-file cap`);
 			await expect(engine.add(bigPdf, "Big Pdf")).rejects.toThrow(/ingestion cap/);
-		});
+		}, 60_000);
 
 		it("blocks remove and clear while update is in flight", async () => {
 			const sourcePath = join(TEST_DIR, "update-guard.txt");
@@ -680,10 +684,12 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("caps URL ingestion at the byte limit", async () => {
-			const oversized = "<p>overflow padding content for the byte cap probe</p>".repeat(200_000); // ~11MB
+			// Buffer.alloc rather than a repeated string: the payload only has to EXCEED the cap, and
+			// a 100 MB JS string would cost more than the whole assertion.
+			const oversized = Buffer.alloc(URL_MAX_BYTES + 1, 0x61);
 			const stream = new ReadableStream<Uint8Array>({
 				start(controller) {
-					controller.enqueue(new TextEncoder().encode(oversized));
+					controller.enqueue(oversized);
 					controller.close();
 				},
 			});

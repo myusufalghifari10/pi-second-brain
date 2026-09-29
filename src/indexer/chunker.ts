@@ -22,7 +22,20 @@ import { rewriteUnitTokens, rewriteUnitWordVariants } from "./units.ts";
 type ChunkMetadataValue = string | number | boolean | string[] | number[] | boolean[] | null | undefined;
 type ChunkMetadata = Record<string, ChunkMetadataValue>;
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+/**
+ * Byte cap for ONE ingestion read — a text file, a PDF, a DOCX, or a URL body.
+ *
+ * This is a memory-safety guard, not a document limit: the file is read whole into a single
+ * allocation, so without a cap one multi-GB dump takes the whole process down. The guard fails
+ * loudly and identically in all four places that need it — the directory scanner skips with a
+ * reason, the single-file read throws, the URL stream aborts, and knowledge_plan warns before
+ * anything runs — so a file that is too big is never a silent data loss.
+ *
+ * Raised from 10 MB to 100 MB: at 10 MB the cap was stricter than the real risk for papers, since
+ * a 17 MB PDF extracts to only a few hundred KB of text and the expensive part is the parse, not
+ * the read. Kept far below anything that would actually threaten the process.
+ */
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
 
 /** Byte cap for one ingestion read — shared with the engine's single-file read path. */
 export const MAX_SOURCE_FILE_SIZE = MAX_FILE_SIZE;

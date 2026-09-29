@@ -62,7 +62,13 @@ function isBinary(path: string): boolean {
 }
 ```
 
-### 大小限制: 預設 10 MB/file (可配)
+### 大小限制: 預設 100 MB/file
+
+單檔 ingest 上限 `MAX_FILE_SIZE`（`src/indexer/chunker.ts`）為 **100 MB**，由 10 MB 上調。
+這是 **記憶體安全閥**，不是文件大小限制：檔案會一次整份讀進單一 allocation，沒有上限的話一個
+multi-GB dump 會把整個進程帶下去。四條路徑行為一致且明確失敗——目錄掃描器 skip 並記錄原因、
+單檔讀取直接 throw、URL 串流中止、`knowledge_plan` 在執行前先警告——因此過大的檔案永遠不會變成
+靜默的資料遺失。`URL_MAX_BYTES`（`src/engine.ts`）與此對齊。
 
 ---
 

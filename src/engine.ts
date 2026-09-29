@@ -840,7 +840,7 @@ function isWeakAutoResponse(
 }
 
 const URL_FETCH_TIMEOUT_MS = 60_000;
-const URL_MAX_BYTES = 10 * 1024 * 1024; // aligns with the chunker MAX_FILE_SIZE cap
+export const URL_MAX_BYTES = 100 * 1024 * 1024; // aligns with the chunker MAX_FILE_SIZE cap
 const URL_TEXT_CONTENT_TYPES = /^(text\/|application\/xhtml\+xml|application\/json)/i;
 
 async function chunkUrl(source: string, signal?: AbortSignal): Promise<Awaited<ReturnType<typeof chunkFile>>> {
