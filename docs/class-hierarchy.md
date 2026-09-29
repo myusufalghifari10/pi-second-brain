@@ -149,6 +149,21 @@ does not help either: it only fires for changes that happen *after* it is instal
 never installs a watcher of its own. Total watcher count is 1 per class root, independent of
 subclass count — the layer does not degrade as subclasses accumulate.
 
+### Deleting files inside a subclass
+
+Deleting a file is an ordinary edit and retracts its chunks on the next tick. Deleting the
+**last** file in a subclass is not: `update()` treats a zero-file scan against a populated KB as
+a broken mount rather than an intentional deletion, and refuses to wipe the index. That guard
+is deliberate — a vanished mount, a chmod'd directory and an offline network drive all look
+identical to a real deletion — so the index keeps serving the last good content instead of
+going dark. Emptying a subclass is therefore done with `knowledge_remove`, not by deleting
+files.
+
+The two dispatch loops in `checkClassRoot` are ordered **discover → update → forget** for the
+same reason. A child that empties is indistinguishable from a child whose directory vanished,
+so `onChildRemoved` fires for it too; if forgetting ran first, the routing entry would already
+be gone by the time `onChildChanged` was reached and the retraction could never happen.
+
 ## Risks
 
 | Risk | Mitigation |
