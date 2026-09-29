@@ -1737,6 +1737,40 @@ export class KnowledgeEngine {
 		return updateRun;
 	}
 
+	/**
+	 * Re-index a class root's subclasses whose indexed file set no longer matches the disk.
+	 *
+	 * diagnoseKB is the right tool here rather than a fresh walk: it already resolves the same
+	 * ScanOptions the indexer used, including the class root's inherited .gitignore, so a subclass
+	 * that is deliberately 100% ignored compares equal instead of looking permanently stale.
+	 * Sequential on purpose — every mutation takes the global "global:mutation" lock, so a parallel
+	 * loop would only make them reject each other.
+	 */
+	private async reconcileClassCoverage(
+		root: string,
+		className: string,
+		onLog?: (level: "info" | "warn", message: string) => void,
+	): Promise<void> {
+		const db = this.db;
+		if (!db) return;
+		for (const kb of listKBs(db)) {
+			if (kb.class_root !== root || !kb.source_path) continue;
+			// A vanished source is a different problem, and update() rejects it outright. Dropping
+			// the KB for that is the documented knowledge_remove path, not a startup reindex.
+			if (!existsSync(kb.source_path)) continue;
+			const diagnosis = diagnoseKB(db, kb, undefined, join(this.knowledgeDir, "vectors"));
+			if (diagnosis.indexed_files === diagnosis.total_source_files) continue;
+			try {
+				await this.update(kb.id);
+			} catch (error) {
+				onLog?.(
+					"warn",
+					`class ${className}: startup reindex of ${kb.name} failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+	}
+
 	private async runUpdate(
 		kb: UpdateableKnowledgeBase,
 		onProgress?: ProgressCallback,
@@ -2938,6 +2972,18 @@ export class KnowledgeEngine {
 					);
 				});
 			void startup;
+			// Layer 5: re-index registered subclasses whose files drifted while Pi was closed. The
+			// reconcile above only adopts a MISSING child; a KB that already exists is never
+			// rescanned, and the class watcher cannot help because its baseline snapshot is taken
+			// AFTER those files landed, so no diff ever reports them. Chained off the reconcile
+			// rather than fired beside it, because both are mutations and they share one lock.
+			const coverage = startup.then(() => this.reconcileClassCoverage(root, className, onLog));
+			void coverage.catch((error: unknown) => {
+				onLog?.(
+					"warn",
+					`class ${className}: startup coverage check of ${root} failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
 			// childPath -> kbId, read on every change event. Rebuilt from a reconcile rather than
 			// rescanning the KB table, so a change burst costs a map hit, not a full listKBs().
 			const byPath = new Map<string, string>();

@@ -145,6 +145,15 @@ directory created while Pi was closed is **already in that baseline** — no dif
 report it, and without an explicit reconcile its content is permanently unindexed. `fs.watch`
 does not help either: it only fires for changes that happen *after* it is installed.
 
+Reconciling a *missing* child is only half the job. A KB that already exists is never rescanned,
+so a subclass that gained files during shutdown kept its old index forever and only a manual
+`knowledge_update` recovered it. `reconcileClassCoverage` closes that half: at startup it runs
+`diagnoseKB` per subclass and re-indexes the ones whose `indexed_files` no longer matches
+`total_source_files`. `diagnoseKB` rather than a fresh walk, because it resolves the same
+`ScanOptions` the indexer used — including the inherited `.gitignore`, so a deliberately fully
+ignored subclass compares equal instead of looking permanently stale. It runs sequentially and
+chained after the reconcile, because both are mutations sharing one global lock.
+
 `engine.ts` skips per-KB watcher startup for any KB that has a `class_root`, so a child KB
 never installs a watcher of its own. Total watcher count is 1 per class root, independent of
 subclass count — the layer does not degrade as subclasses accumulate.

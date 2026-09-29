@@ -182,6 +182,30 @@ describe("class hierarchy (layer 5)", () => {
 			expect(started).toEqual([]);
 		});
 
+		it("re-indexes a registered subclass whose files appeared while Pi was closed", async () => {
+			// A KB that already exists, with its one file indexed.
+			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
+			await engine.reconcileClassRoot(classRoot, "om");
+			await waitFor(() => chunksOf("om-01a0c0f2-a0a") > 0);
+			const before = chunksOf("om-01a0c0f2-a0a");
+
+			// Two more files land on disk. No watcher is installed here, so no file event can fire
+			// for them — this is exactly the state a restart finds: the files appeared while Pi was
+			// closed, so the next session's baseline snapshot ALREADY contains them and no diff will
+			// ever report them.
+			const childPath = join(classRoot, "01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249");
+			writeFileSync(join(childPath, "STATE.md"), "# State\n\nfirst state file.\n");
+			writeFileSync(join(childPath, "DEATHS.md"), "# Deaths\n\nfirst death file.\n");
+
+			engine.startClassWatchers(noopWatchModule, {});
+
+			// Without a startup coverage pass this waits forever: reconcileClassRoot only adopts a
+			// MISSING child, and a registered KB is never rescanned.
+			await waitFor(() => chunksOf("om-01a0c0f2-a0a") > before, 60_000);
+			expect(filesOf("om-01a0c0f2-a0a").has("STATE.md")).toBe(true);
+			expect(filesOf("om-01a0c0f2-a0a").has("DEATHS.md")).toBe(true);
+		}, 120_000);
+
 		it("adopts an unregistered child on startup for a registered class root", async () => {
 			// Register class "om" with one child, then add a second child and wipe the first KB to
 			// emulate a conversation that appeared while Pi was down.
