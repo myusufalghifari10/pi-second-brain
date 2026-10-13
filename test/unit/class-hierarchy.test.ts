@@ -170,8 +170,8 @@ describe("class hierarchy (layer 5)", () => {
 			// drop the child on disk, then start. The watcher's baseline snapshot already contains
 			// the child, so onNewChild can never fire for it — only the startup reconcile sees it.
 			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
-			await engine.reconcileClassRoot(classRoot, "om");
-			const stale = engine.remove("om-01a0c0f2-a0a");
+			await engine.reconcileClassRoot(classRoot, "convo");
+			const stale = engine.remove("convo-01a0c0f2-a0a");
 			expect(listKBs(engine["db"]!)).toHaveLength(0);
 			await stale;
 
@@ -185,9 +185,9 @@ describe("class hierarchy (layer 5)", () => {
 		it("re-indexes a registered subclass whose files appeared while Pi was closed", async () => {
 			// A KB that already exists, with its one file indexed.
 			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
-			await engine.reconcileClassRoot(classRoot, "om");
-			await waitFor(() => chunksOf("om-01a0c0f2-a0a") > 0);
-			const before = chunksOf("om-01a0c0f2-a0a");
+			await engine.reconcileClassRoot(classRoot, "convo");
+			await waitFor(() => chunksOf("convo-01a0c0f2-a0a") > 0);
+			const before = chunksOf("convo-01a0c0f2-a0a");
 
 			// Two more files land on disk. No watcher is installed here, so no file event can fire
 			// for them — this is exactly the state a restart finds: the files appeared while Pi was
@@ -201,18 +201,18 @@ describe("class hierarchy (layer 5)", () => {
 
 			// Without a startup coverage pass this waits forever: reconcileClassRoot only adopts a
 			// MISSING child, and a registered KB is never rescanned.
-			await waitFor(() => chunksOf("om-01a0c0f2-a0a") > before, 60_000);
-			expect(filesOf("om-01a0c0f2-a0a").has("STATE.md")).toBe(true);
-			expect(filesOf("om-01a0c0f2-a0a").has("DEATHS.md")).toBe(true);
+			await waitFor(() => chunksOf("convo-01a0c0f2-a0a") > before, 60_000);
+			expect(filesOf("convo-01a0c0f2-a0a").has("STATE.md")).toBe(true);
+			expect(filesOf("convo-01a0c0f2-a0a").has("DEATHS.md")).toBe(true);
 		}, 120_000);
 
 		it("adopts an unregistered child on startup for a registered class root", async () => {
-			// Register class "om" with one child, then add a second child and wipe the first KB to
+			// Register class "convo" with one child, then add a second child and wipe the first KB to
 			// emulate a conversation that appeared while Pi was down.
 			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
-			await engine.reconcileClassRoot(classRoot, "om");
+			await engine.reconcileClassRoot(classRoot, "convo");
 			writeChild("01a0e17a-fb6e-7046-841a-62547c37c0eb", { journey: JOURNEY, topic: "browser-redesign.md" });
-			await engine.remove("om-01a0e17a-fb6");
+			await engine.remove("convo-01a0e17a-fb6");
 
 			engine.startClassWatchers(noopWatchModule, {});
 
@@ -220,17 +220,17 @@ describe("class hierarchy (layer 5)", () => {
 			// chunks, so a KB is briefly visible with chunk_count 0 and asserting on it there is a
 			// race, not a failure.
 			await waitFor(() => {
-				const kb = listKBs(engine["db"]!).find((entry) => entry.name === "om-01a0e17a-fb6");
+				const kb = listKBs(engine["db"]!).find((entry) => entry.name === "convo-01a0e17a-fb6");
 				return kb !== undefined && kb.chunk_count > 0;
 			});
-			const kb = listKBs(engine["db"]!).find((entry) => entry.name === "om-01a0e17a-fb6");
-			expect(kb?.class).toBe("om");
+			const kb = listKBs(engine["db"]!).find((entry) => entry.name === "convo-01a0e17a-fb6");
+			expect(kb?.class).toBe("convo");
 			expect(kb?.chunk_count).toBeGreaterThan(0);
 		});
 
 		it("reports a failed startup reconcile instead of swallowing it", async () => {
 			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "om-fork-research.md" });
-			await engine.reconcileClassRoot(classRoot, "om");
+			await engine.reconcileClassRoot(classRoot, "convo");
 			// Keep the KB row so the class root stays registered, then replace the root with a file
 			// so the reconcile's readdirSync fails with ENOTDIR. Removing the KB instead would empty
 			// the roots map and the reconcile would never run at all.
@@ -255,7 +255,7 @@ describe("class hierarchy (layer 5)", () => {
 		// the snapshot diff and the child KB — a mocked watcher reproduces neither.
 		beforeEach(async () => {
 			childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md"]);
-			await engine.reconcileClassRoot(classRoot, "om");
+			await engine.reconcileClassRoot(classRoot, "convo");
 			engine.startClassWatchers(watchModule, {});
 		});
 
@@ -263,19 +263,19 @@ describe("class hierarchy (layer 5)", () => {
 		// these drive the real clock and need far more than the default 15s timeout.
 		it("re-indexes a live subclass after one of its files is deleted", async () => {
 			childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md", "b.md"]);
-			await waitFor(() => chunksOf("om-01a0c0f2-a0a") === 2);
+			await waitFor(() => chunksOf("convo-01a0c0f2-a0a") === 2);
 
 			// The child stays alive, so onChildRemoved must NOT fire, but the deletion is still an
 			// ordinary edit and the orphan chunk has to be retracted.
 			unlinkSync(join(classRoot, "01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", "b.md"));
 
-			await waitFor(() => chunksOf("om-01a0c0f2-a0a") === 1);
-			expect(chunksOf("om-01a0c0f2-a0a")).toBe(1);
+			await waitFor(() => chunksOf("convo-01a0c0f2-a0a") === 1);
+			expect(chunksOf("convo-01a0c0f2-a0a")).toBe(1);
 		}, 120_000);
 
 		it("keeps routing a subclass that went empty and was refilled", async () => {
 			const childPath = childWith("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", ["a.md"]);
-			await waitFor(() => filesOf("om-01a0c0f2-a0a").has("a.md"));
+			await waitFor(() => filesOf("convo-01a0c0f2-a0a").has("a.md"));
 
 			// A child that empties is indistinguishable from one whose directory vanished, so
 			// onChildRemoved fires and drops the child->kbId mapping. The index is deliberately NOT
@@ -287,9 +287,31 @@ describe("class hierarchy (layer 5)", () => {
 			await new Promise((resolve) => setTimeout(resolve, 8000));
 
 			writeFileSync(join(childPath, "c.md"), "# c.md\n\nrefilled with different material.\n");
-			await waitFor(() => filesOf("om-01a0c0f2-a0a").has("c.md"), 60_000);
-			expect(filesOf("om-01a0c0f2-a0a").has("c.md")).toBe(true);
+			await waitFor(() => filesOf("convo-01a0c0f2-a0a").has("c.md"), 60_000);
+			expect(filesOf("convo-01a0c0f2-a0a").has("c.md")).toBe(true);
 		}, 180_000);
+	});
+
+	describe("auto-index skip list", () => {
+		it("never auto-indexes a skipped class, even with class-root rows still registered", async () => {
+			// The coupling this pins: pi-observational-memory keeps its durable memory under
+			// `.memory/<sessionId>` — OM owns that memory and reads it as files, so the class watcher
+			// must not adopt new conversation directories into the vector index.
+			writeChild("01a0c0f2-a0ab-76fa-83d6-c92fe9cb2249", { journey: JOURNEY, topic: "state.md" });
+			await engine.reconcileClassRoot(classRoot, "om");
+			expect(listKBs(engine["db"]!).map((kb) => kb.class)).toEqual(["om"]);
+
+			// A conversation directory that appeared while Pi was closed: the restart case the class
+			// watcher exists for. For a skipped class it must stay invisible.
+			writeChild("01a0e17a-fb6e-7046-841a-62547c37c0eb", { journey: JOURNEY, topic: "state.md" });
+
+			const started = engine.startClassWatchers(noopWatchModule, {});
+
+			expect(started).toEqual([]);
+			// Give any (wrong) startup reconcile room to land before asserting the negative.
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			expect(listKBs(engine["db"]!).map((kb) => kb.name)).toEqual(["om-01a0c0f2-a0a"]);
+		});
 	});
 
 	describe("name collisions", () => {

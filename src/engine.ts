@@ -359,6 +359,21 @@ const FORMULA_INJECTION_LIMIT = 5;
 const DEPENDENCY_WALK_EDGES_PER_CHUNK = 2;
 const DEPENDENCY_INJECTION_LIMIT = 10;
 
+/**
+ * Classes that must NEVER be auto-indexed: `startClassWatchers` ignores a class root whose class
+ * is listed here — no class watcher, no startup reconcile, no coverage pass — so child directories
+ * under that root can never become knowledge bases implicitly. `om` is pi-observational-memory's
+ * own `.memory/<sessionId>` tree: OM owns that memory (retrieval is reading/greping those files),
+ * so indexing it here is an unwanted coupling rather than a feature. Explicit, user-initiated
+ * `knowledge_class_add` / `knowledge_class_sync` still work — this only blocks the automatic path.
+ */
+export const AUTO_INDEX_SKIP_CLASSES: readonly string[] = ["om"];
+
+/** True when `className` must never be auto-indexed (see AUTO_INDEX_SKIP_CLASSES). */
+export function isAutoIndexSkippedClass(className: string | null | undefined): boolean {
+	return typeof className === "string" && AUTO_INDEX_SKIP_CLASSES.includes(className);
+}
+
 interface DirectoryScanPlan {
 	files: number;
 	bytes: number;
@@ -2944,6 +2959,11 @@ export class KnowledgeEngine {
 		const roots = new Map<string, { className: string; children: string[] }>();
 		for (const kb of listKBs(this.db)) {
 			if (!kb.class_root || !kb.class || !kb.source_path) continue;
+			// AUTO_INDEX_SKIP_CLASSES: an integration owning its own storage is never auto-watched.
+			// Skipping here (rather than at a call site) covers every caller — and since the roots
+			// map is built ONLY from KB rows, a skipped class needs no separate registration to
+			// stay skipped: existing rows keep working, nothing new is adopted.
+			if (isAutoIndexSkippedClass(kb.class)) continue;
 			const entry = roots.get(kb.class_root) ?? { className: kb.class, children: [] };
 			entry.children.push(kb.source_path);
 			roots.set(kb.class_root, entry);

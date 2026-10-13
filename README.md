@@ -11,7 +11,7 @@ One local index that can hold **anything** — codebases, documentation, scienti
 > retrieval layer and a much broader ingestion pipeline. The runtime namespace is kept for compatibility:
 > environment variables stay `PI_KNOWLEDGE_*`, tools stay `knowledge_*`, storage stays `~/.pi/knowledge`.
 
-> **Pairs with [pi-observational-memory](https://github.com/myusufalghifari10/pi-observational-memory)** — the pi-native extension that turns long-running sessions into durable `.memory/` topic files, which this KB can index and answer from. Observational memory writes; pi-second-brain retrieves — two halves of one memory stack.
+> **Independent of [pi-observational-memory](https://github.com/myusufalghifari10/pi-observational-memory).** They used to be wired together — OM's `.memory/` topic files were indexed here as `om-*` knowledge bases — and they are no longer: OM owns that memory and reads it as plain markdown (its compaction block no longer advertises `knowledge_search`). The `om` class sits on the auto-index skip list (`AUTO_INDEX_SKIP_CLASSES` in `src/engine.ts`), so a memory directory is never adopted as a KB implicitly; an explicit `knowledge_class_add` / `knowledge_class_sync` still works if you ever want that behaviour back.
 
 ---
 

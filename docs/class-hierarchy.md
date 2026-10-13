@@ -3,6 +3,13 @@
 Status: implemented (schema v9)
 Layer: 5 (follows `docs/layer2-pdf-sidecar-plan.md`, `docs/layer3-formula-retrieval-plan.md`, `docs/layer4-fidelity-breadth-plan.md`)
 
+> **Update (2026-10-13).** The `om` class is now on the engine's auto-index skip list
+> (`AUTO_INDEX_SKIP_CLASSES` in `src/engine.ts`): a class root whose class is listed there gets no
+> class watcher, no startup reconcile and no coverage pass, so its child directories are never
+> adopted as knowledge bases implicitly. `om-memory` below is kept as the historical motivation for
+> the feature — the mechanism it exercises is unchanged, and an explicit `knowledge_class_add` /
+> `knowledge_class_sync` still works.
+
 ## Problem
 
 Every knowledge base is one flat bag of chunks. `om-memory` indexes `~/.memory/`, which is
